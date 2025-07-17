@@ -20,6 +20,8 @@
 #include <Graphics/Skybox.h>
 #include <Graphics/GraphicsTypes.h>
 
+#include <xatlas.h>
+
 #include "PostProcessor.h"
 #include "MeshRenderer.h"
 
@@ -39,7 +41,7 @@ protected:
 
     // Model
     Model sceneModels[uint64(Scenes::NumValues)];
-    const Model* currentModel = nullptr;
+    Model* currentModel = nullptr;
     MeshRenderer meshRenderer;
 
     RenderTexture mainTarget;
@@ -75,6 +77,13 @@ protected:
 
     bool32 stablePowerState = false;
 
+    RenderTexture bakedLightMap; 
+
+    bool showLightmapWindow = true;
+    bool bakeRequested = false;
+    Float4 lightmapWindowRect = { 25.0f, 50.0f, 512.0f, 512.0f };
+    bool isFirstFrame = true;
+
     // Ray tracing resources
     CompiledShaderPtr rayTraceLib;
     RenderTexture rtTarget;
@@ -91,7 +100,6 @@ protected:
     FirstPersonCamera rtCurrCamera;
     bool rtShouldRestartPathTrace = false;
     uint32 rtCurrSampleIdx = 0;
-
 
     virtual void Initialize() override;
     virtual void Shutdown() override;
@@ -121,7 +129,8 @@ protected:
 
     void BuildRTAccelerationStructure();
 
-public:
+    void RenderBakingPass();
 
+public:
     DXRPathTracer(const wchar* cmdLine);
 };

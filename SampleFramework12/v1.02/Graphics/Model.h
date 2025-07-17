@@ -29,6 +29,7 @@ struct MeshVertex
     Float2 UV;
     Float3 Tangent;
     Float3 Bitangent;
+    Float2 LightmapUV = Float2(0.0f, 0.0f);
 
     MeshVertex()
     {
@@ -61,6 +62,7 @@ struct MeshVertex
         SerializeItem(serializer, UV);
         SerializeItem(serializer, Tangent);
         SerializeItem(serializer, Bitangent);
+        SerializeItem(serializer, LightmapUV);
     }
 };
 
@@ -124,6 +126,7 @@ enum class InputElementType : uint64
     Tangent,
     Bitangent,
     UV,
+    LightmapUV,
 
     NumTypes,
 };

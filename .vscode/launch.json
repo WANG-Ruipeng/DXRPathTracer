@@ -1,0 +1,29 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch DXRPathTracer (Debug)", // 1. 新名字
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/DXRPathTracer/x64/Debug/DXRPathTracer.exe", // 2. 关键修改：路径改为Debug
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/DXRPathTracer",
+            "environment": [],
+            "console": "internalConsole",
+            "preLaunchTask": "Build Debug" // 3. 关联到Debug构建任务
+        },
+        {
+            "name": "Launch DXRPathTracer (Release)", // 这是之前的Release启动项
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/DXRPathTracer/x64/Release/DXRPathTracer.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/DXRPathTracer",
+            "environment": [],
+            "console": "internalConsole",
+            "preLaunchTask": "Build Release" // 关联到Release构建任务
+        }
+    ]
+}

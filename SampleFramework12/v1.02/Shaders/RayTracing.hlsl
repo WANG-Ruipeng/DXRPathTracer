@@ -17,6 +17,7 @@ struct MeshVertex
     float2 UV;
     float3 Tangent;
     float3 Bitangent;
+    float2 LightmapUV;
 };
 
 float BarycentricLerp(in float v0, in float v1, in float v2, in float3 barycentrics)

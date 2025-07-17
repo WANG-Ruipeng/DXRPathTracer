@@ -1,0 +1,46 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build Debug", // 1. 新标签
+            "type": "shell",
+            "command": "C:/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/amd64/MSBuild.exe",
+            "args": [
+                "DXRPathTracer.sln",
+                "/p:Configuration=Debug", // 2. 关键修改：改为Debug
+                "/p:Platform=x64",
+                "/p:PreferredToolArchitecture=x64"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/DXRPathTracer"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true // 3. 将这个设为默认构建任务
+            },
+            "presentation": {
+                "reveal": "always"
+            },
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "Build Release", // 这是之前的Release任务，改个名留作备用
+            "type": "shell",
+            "command": "C:/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/amd64/MSBuild.exe",
+            "args": [
+                "DXRPathTracer.sln",
+                "/p:Configuration=Release",
+                "/p:Platform=x64",
+                "/p:PreferredToolArchitecture=x64"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/DXRPathTracer"
+            },
+            "group": "build", // 不再是默认
+            "presentation": {
+                "reveal": "always"
+            },
+            "problemMatcher": "$msCompile"
+        }
+    ]
+}

@@ -60,6 +60,7 @@
       <TreatWarningAsError>true</TreatWarningAsError>
       <MultiProcessorCompilation>false</MultiProcessorCompilation>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\Externals\xatlas;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -78,6 +79,7 @@
       <TreatWarningAsError>true</TreatWarningAsError>
       <MultiProcessorCompilation>false</MultiProcessorCompilation>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\Externals\xatlas;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -87,6 +89,12 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="..\Externals\xatlas\xatlas.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
+      <TreatWarningAsError Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</TreatWarningAsError>
+      <TreatWarningAsError Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</TreatWarningAsError>
+    </ClCompile>
     <ClCompile Include="..\SampleFramework12\v1.02\App.cpp" />
     <ClCompile Include="..\SampleFramework12\v1.02\Assert.cpp" />
     <ClCompile Include="..\SampleFramework12\v1.02\EnkiTS\TaskScheduler.cpp" />
@@ -137,6 +145,8 @@
     <ClCompile Include="DXRPathTracer.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\Externals\xatlas\xatlas.h" />
+    <ClInclude Include="..\Externals\xatlas\xatlas_c.h" />
     <ClInclude Include="..\SampleFramework12\v1.02\App.h" />
     <ClInclude Include="..\SampleFramework12\v1.02\Assert.h" />
     <ClInclude Include="..\SampleFramework12\v1.02\Containers.h" />

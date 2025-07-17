@@ -58,6 +58,8 @@ static const uint64 NumConeSides = 16;
 
 static const bool Benchmark = false;
 
+static const uint32 LightMapResolution = 2048;
+
 struct HitGroupRecord
 {
     ShaderIdentifier ID;
@@ -404,6 +406,8 @@ void DXRPathTracer::Shutdown()
     rtHitTable.Shutdown();
     rtMissTable.Shutdown();
     rtGeoInfoBuffer.Shutdown();
+
+    bakedLightMap.Shutdown();
 }
 
 void DXRPathTracer::CreatePSOs()
@@ -529,6 +533,20 @@ void DXRPathTracer::CreateRenderTargets()
         rtInit.Name = L"Resolve Target";
         resolveTarget.Initialize(rtInit);
     }
+
+    {
+       // 新增：创建用于光照贴图的纹理资源
+       RenderTextureInit lmInit;
+       lmInit.Width = LightMapResolution;
+       lmInit.Height = LightMapResolution;
+       lmInit.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;  // 使用高精度浮点格式存储HDR颜色
+       lmInit.MSAASamples = 1;
+       lmInit.ArraySize = 1;
+       lmInit.CreateUAV = true;                         // 需要UAV视图以便于写入烘焙结果
+       lmInit.InitialState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE; // 初始状态为可读，烘焙时再切换
+       lmInit.Name = L"Baked Light Map";
+       bakedLightMap.Initialize(lmInit);
+   }
 
     {
         DepthBufferInit dbInit;
@@ -1010,6 +1028,31 @@ void DXRPathTracer::Render(const Timer& timer)
         spotLightBuffer.QueueUpload(staging.Resource, staging.ResourceOffset, spotLightBuffer.InternalBuffer.Size, 0);
     }
 
+    if (isFirstFrame)
+    {
+
+        // 2. 将资源状态切换为“可写”
+        bakedLightMap.MakeWritable(cmdList);
+
+        // 3. 定义清除颜色为纯黑
+        const float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+        // 4. 执行清除操作
+        cmdList->ClearRenderTargetView(bakedLightMap.RTV, clearColor, 0, nullptr);
+
+        // 5. 将资源状态切换回“可读”，为本帧的spriteRenderer做准备
+        bakedLightMap.MakeReadable(cmdList);
+
+        // 6. 将标志设为false，确保此代码块不再执行
+        isFirstFrame = false;
+    }
+
+    if (bakeRequested)
+    {
+        RenderBakingPass();
+        bakeRequested = false; // 重置请求，这样它只执行一次
+    }
+
     if(AppSettings::EnableRayTracing)
     {
         RenderRayTracing();
@@ -1310,6 +1353,36 @@ void DXRPathTracer::RenderResolve()
     resolveTarget.MakeReadable(cmdList);
 }
 
+void DXRPathTracer::RenderBakingPass()
+{
+    ID3D12GraphicsCommandList* cmdList = DX12::CmdList;
+    PIXMarker marker(cmdList, "Baking Pass");
+
+    // 1. 将资源从“可读”状态转换到“可写(UAV)”状态
+    // 这个函数假设资源之前是可读的，这在我们的流程中是成立的。
+    bakedLightMap.MakeWritableUAV(cmdList);
+
+    // 2. 执行UAV操作（填充为红色）
+    // 获取CPU句柄
+    D3D12_CPU_DESCRIPTOR_HANDLE uavCPUHandle = bakedLightMap.UAV;
+
+    // 将CPU句柄复制到GPU可见的临时堆中，并获取其GPU句柄
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandles[] = { uavCPUHandle };
+    D3D12_GPU_DESCRIPTOR_HANDLE uavGPUHandle = DX12::TempDescriptorTable(cpuHandles, 1);
+
+    // 执行清除操作
+    const float clearColor[4] = { 1.0f, 0.0f, 0.0f, 1.0f }; // 红色
+    cmdList->ClearUnorderedAccessViewFloat(uavGPUHandle, uavCPUHandle, bakedLightMap.Resource(), clearColor, 0, nullptr);
+
+    // 3. 插入一个UAV屏障，确保所有写入完成
+    // 注意：这里的屏障不是状态切换，而是确保GPU的UAV写入操作完成，以便后续步骤可以安全地读取或切换状态。
+    bakedLightMap.UAVBarrier(cmdList);
+
+    // 4. 将资源从“可写(UAV)”状态转换回“可读”状态
+    // 调用正确的函数 MakeReadableUAV，它知道资源当前处于 UNORDERED_ACCESS 状态
+    bakedLightMap.MakeReadableUAV(cmdList); 
+}
+
 void DXRPathTracer::RenderRayTracing()
 {
     // Don't keep tracing rays if we've hit our maximum per-pixel sample count
@@ -1382,6 +1455,21 @@ void DXRPathTracer::RenderHUD(const Timer& timer)
     std::wstring fpsText = MakeString(L"Frame Time: %.2fms (%u FPS)", 1000.0f / fps, fps);
     spriteRenderer.RenderText(cmdList, font, fpsText.c_str(), textPos, Float4(1.0f, 1.0f, 0.0f, 1.0f));
 
+    if (showLightmapWindow)
+    {
+        // 我们直接使用 lightmapWindowRect 作为纹理的目标绘制区域
+        // SpriteTransform 的 Scale 是基于纹理原始大小的乘数，所以我们用目标尺寸除以原始尺寸
+        Float2 scale;
+        scale.x = lightmapWindowRect.z / bakedLightMap.Width();
+        scale.y = lightmapWindowRect.w / bakedLightMap.Height();
+
+        SpriteTransform transform;
+        transform.Position = Float2(lightmapWindowRect.x, lightmapWindowRect.y);
+        transform.Scale = scale;
+
+        spriteRenderer.Render(cmdList, &bakedLightMap.Texture, transform);
+    }
+
     spriteRenderer.End();
 
     // Draw the progress bar
@@ -1435,13 +1523,67 @@ void DXRPathTracer::RenderHUD(const Timer& timer)
 
         ImGui::End();
     }
+
+    if (showLightmapWindow)
+    {
+        // 设置窗口的初始大小
+        ImGui::SetNextWindowSize(ImVec2(512.0f, 600.0f), ImGuiCond_FirstUseEver);
+
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+
+        if (ImGui::Begin("Baked Lightmap", &showLightmapWindow))
+        {
+            // === 核心修正部分 ===
+
+            // 1. 获取内容区域的精确位置和大小
+            ImVec2 contentPos = ImGui::GetCursorScreenPos();
+            ImVec2 contentSize = ImGui::GetContentRegionAvail();
+
+            // 2. 计算保持正方形居中显示的最终尺寸和位置
+            float aspect = bakedLightMap.Width() / float(bakedLightMap.Height()); // 我们的纹理是正方形，所以 aspect = 1.0
+            float finalWidth, finalHeight, offsetX, offsetY;
+
+            if (contentSize.x / contentSize.y >= aspect)
+            {
+                // 内容区域比纹理更“宽”，以高为基准
+                finalHeight = contentSize.y;
+                finalWidth = finalHeight * aspect;
+                offsetY = 0;
+                offsetX = (contentSize.x - finalWidth) * 0.5f;
+            }
+            else
+            {
+                // 内容区域比纹理更“高”，以宽为基准
+                finalWidth = contentSize.x;
+                finalHeight = finalWidth / aspect;
+                offsetX = 0;
+                offsetY = (contentSize.y - finalHeight) * 0.5f;
+            }
+
+            // 3. 更新下一帧 spriteRenderer 要使用的矩形
+            lightmapWindowRect.x = contentPos.x + offsetX;
+            lightmapWindowRect.y = contentPos.y + offsetY;
+            lightmapWindowRect.z = finalWidth;
+            lightmapWindowRect.w = finalHeight;
+
+            // 在窗口里添加按钮
+            if (ImGui::Button("Start Baking"))
+            {
+                bakeRequested = true;
+            }
+            ImGui::Separator();
+        }
+
+        ImGui::End();
+        ImGui::PopStyleColor();
+    }
 }
 
 void DXRPathTracer::BuildRTAccelerationStructure()
 {
     const FormattedBuffer& idxBuffer = currentModel->IndexBuffer();
     const StructuredBuffer& vtxBuffer = currentModel->VertexBuffer();
-
+ 
     const uint64 numMeshes = currentModel->NumMeshes();
     Array<D3D12_RAYTRACING_GEOMETRY_DESC> geometryDescs(numMeshes);
 

@@ -128,6 +128,7 @@
     <ClCompile Include="..\SampleFramework12\v1.02\Graphics\DXRHelper.cpp">
       <Filter>SampleFramework12\Graphics</Filter>
     </ClCompile>
+    <ClCompile Include="..\Externals\xatlas\xatlas.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="AppSettings.h" />
@@ -286,6 +287,8 @@
     <ClInclude Include="..\SampleFramework12\v1.02\Graphics\DXRHelper.h">
       <Filter>SampleFramework12\Graphics</Filter>
     </ClInclude>
+    <ClInclude Include="..\Externals\xatlas\xatlas.h" />
+    <ClInclude Include="..\Externals\xatlas\xatlas_c.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="SampleFramework12">
