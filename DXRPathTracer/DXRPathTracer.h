@@ -77,10 +77,32 @@ protected:
 
     bool32 stablePowerState = false;
 
-    RenderTexture bakedLightMap; 
+    RenderTexture bakedLightMap;
+    RenderTexture uvLayoutMap;
+
+    RenderTexture surfaceMap;
+    RenderTexture surfaceMapNormal;
+    RenderTexture accumulationBuffer;
+
+    // 烘焙管线状态
+    bool isBaking = false;
+    uint32 bakingSampleIndex = 0;
+    enum class TextureToPreview { UVLayout, SurfaceMap, Accumulation, FinalLightmap };
+    TextureToPreview textureToPreview = TextureToPreview::FinalLightmap;
+
+    // 用于生成 SurfaceMap 的资源
+    CompiledShaderPtr surfaceMapVS;
+    CompiledShaderPtr surfaceMapPS;
+    ID3D12RootSignature* surfaceMapRS = nullptr;
+    ID3D12PipelineState* surfaceMapPSO = nullptr;
+
+    // 用于烘焙的 DXR 资源
+    CompiledShaderPtr bakingLib;
+    ID3D12StateObject* bakingPSO = nullptr;
+    StructuredBuffer bakingRayGenTable;
 
     bool showLightmapWindow = true;
-    bool bakeRequested = false;
+    //bool bakeRequested = false;
     Float4 lightmapWindowRect = { 25.0f, 50.0f, 512.0f, 512.0f };
     bool isFirstFrame = true;
     bool uvVisualizationRequested = false;
@@ -137,6 +159,10 @@ protected:
     void BuildRTAccelerationStructure();
 
     void RenderBakingPass();
+    void RenderSurfaceMap();
+    void RenderBakingPass_Progressive();
+
+    D3D12_CPU_DESCRIPTOR_HANDLE g_NullUAV;
 
 public:
     DXRPathTracer(const wchar* cmdLine);

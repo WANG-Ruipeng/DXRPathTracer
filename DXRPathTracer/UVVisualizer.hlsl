@@ -7,7 +7,7 @@
 #include <RayTracing.hlsl>
 #include <Sampling.hlsl>
 
-#include "SharedTypes.h" // 假设共享结构体在这里
+#include "SharedTypes.h"
 #include "AppSettings.hlsl"
 
 struct VSInput

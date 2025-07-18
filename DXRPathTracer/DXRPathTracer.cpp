@@ -58,7 +58,7 @@ static const uint64 NumConeSides = 16;
 
 static const bool Benchmark = false;
 
-static const uint32 LightMapResolution = 2048;
+static const uint32 LightMapResolution = 256;
 
 struct HitGroupRecord
 {
@@ -141,6 +141,7 @@ enum RTRootParams : uint32
     RTParams_CBuffer,
     RTParams_LightCBuffer,
     RTParams_AppSettings,
+    RTParams_BakingCBuffer,
 
     NumRTRootParams
 };
@@ -236,6 +237,23 @@ void DXRPathTracer::Initialize()
 
         // 给它起个名字，方便在调试器（如PIX）中识别
         uvVisRS->SetName(L"UV Visualizer Root Signature");
+    }
+
+    {
+        // 编译 SurfaceMap 着色器
+        surfaceMapVS = CompileFromFile(L"SurfaceMap.hlsl", "VSMain", ShaderType::Vertex);
+        surfaceMapPS = CompileFromFile(L"SurfaceMap.hlsl", "PSMain", ShaderType::Pixel);
+
+        // 编译 Baking DXR 库
+        bakingLib = CompileFromFile(L"Baking.hlsl", nullptr, ShaderType::Library);
+
+        // 创建 SurfaceMap 的根签名 (空白即可)
+        D3D12_ROOT_SIGNATURE_DESC1 surfaceMapRSDesc = {};
+        surfaceMapRSDesc.NumParameters = 0;
+        surfaceMapRSDesc.pParameters = nullptr;
+        surfaceMapRSDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        DX12::CreateRootSignature(&surfaceMapRS, surfaceMapRSDesc);
+        surfaceMapRS->SetName(L"Surface Map Root Signature");
     }
 
     {
@@ -384,6 +402,7 @@ void DXRPathTracer::Initialize()
     }
 
     InitRayTracing();
+    
 }
 
 void DXRPathTracer::Shutdown()
@@ -424,7 +443,14 @@ void DXRPathTracer::Shutdown()
     rtMissTable.Shutdown();
     rtGeoInfoBuffer.Shutdown();
 
+    bakingRayGenTable.Shutdown();
+    surfaceMap.Shutdown();
+    surfaceMapNormal.Shutdown(); 
+    accumulationBuffer.Shutdown();
+    DX12::Release(surfaceMapRS);  
+
     bakedLightMap.Shutdown();
+    uvLayoutMap.Shutdown();
     DX12::Release(uvVisRS);
 }
 
@@ -432,18 +458,18 @@ void DXRPathTracer::VisualizeUVs(Model* model)
 {
     ID3D12GraphicsCommandList* cmdList = DX12::CmdList;
 
-    // 1. 将 bakedLightMap 切换为渲染目标状态
-    bakedLightMap.MakeWritable(cmdList);
+    // 1. 将 uvLayoutMap 切换为渲染目标状态
+    uvLayoutMap.MakeWritable(cmdList);
 
     // 2. 清除为黑色背景
     const float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-    cmdList->ClearRenderTargetView(bakedLightMap.RTV, clearColor, 0, nullptr);
+    cmdList->ClearRenderTargetView(uvLayoutMap.RTV, clearColor, 0, nullptr);
 
     // 3. 设置渲染状态
-    cmdList->OMSetRenderTargets(1, &bakedLightMap.RTV, false, nullptr);
-    DX12::SetViewport(cmdList, bakedLightMap.Width(), bakedLightMap.Height());
+    cmdList->OMSetRenderTargets(1, &uvLayoutMap.RTV, false, nullptr);
+    DX12::SetViewport(cmdList, uvLayoutMap.Width(), uvLayoutMap.Height());
     cmdList->SetPipelineState(uvVisPSO);
-    cmdList->SetGraphicsRootSignature(uvVisRS); // 假设你已创建
+    cmdList->SetGraphicsRootSignature(uvVisRS);
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     // 4. 绑定光照贴图几何体的缓冲
@@ -459,8 +485,8 @@ void DXRPathTracer::VisualizeUVs(Model* model)
         cmdList->DrawIndexedInstanced(mesh.NumIndices(), 1, mesh.IndexOffset(), mesh.VertexOffset(), 0);
     }
 
-    // 6. 将 bakedLightMap 切换回可读状态，以便HUD显示
-    bakedLightMap.MakeReadable(cmdList);
+    // 6. 将 uvLayoutMap 切换回可读状态，以便HUD显示
+    uvLayoutMap.MakeReadable(cmdList);
 }
 
 void DXRPathTracer::CreatePSOs()
@@ -550,7 +576,7 @@ void DXRPathTracer::CreatePSOs()
     psoDesc.SampleMask = UINT_MAX;
     psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     psoDesc.NumRenderTargets = 1;
-    psoDesc.RTVFormats[0] = bakedLightMap.Format(); // 渲染目标格式必须匹配
+    psoDesc.RTVFormats[0] = uvLayoutMap.Format(); // 渲染目标格式必须匹配
     psoDesc.SampleDesc.Count = 1;
 
     // 我们需要一个特殊的 Input Layout，只读取 LightmapUV
@@ -561,6 +587,29 @@ void DXRPathTracer::CreatePSOs()
     psoDesc.InputLayout = { inputElements, ArraySize_(inputElements) };
 
     DXCall(DX12::Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&uvVisPSO)));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC smPsoDesc = {};
+    smPsoDesc.pRootSignature = surfaceMapRS;
+    smPsoDesc.VS = surfaceMapVS.ByteCode();
+    smPsoDesc.PS = surfaceMapPS.ByteCode();
+    smPsoDesc.RasterizerState = DX12::GetRasterizerState(RasterizerState::NoCull);
+    smPsoDesc.BlendState = DX12::GetBlendState(BlendState::Disabled);
+    smPsoDesc.DepthStencilState = DX12::GetDepthState(DepthState::Disabled);
+    smPsoDesc.SampleMask = UINT_MAX;
+    smPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    smPsoDesc.NumRenderTargets = 2; // 输出到两个RT
+    smPsoDesc.RTVFormats[0] = surfaceMap.Format();      // 世界坐标
+    smPsoDesc.RTVFormats[1] = surfaceMap.Format();      // 世界法线
+    smPsoDesc.SampleDesc.Count = 1;
+
+    D3D12_INPUT_ELEMENT_DESC smInputElements[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(MeshVertex, Position), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(MeshVertex, Normal),   D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT,    0, offsetof(MeshVertex, LightmapUV), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    };
+    smPsoDesc.InputLayout = { smInputElements, ArraySize_(smInputElements) };
+    DXCall(DX12::Device->CreateGraphicsPipelineState(&smPsoDesc, IID_PPV_ARGS(&surfaceMapPSO)));
 
     CreateRayTracingPSOs();
 }
@@ -577,6 +626,9 @@ void DXRPathTracer::DestroyPSOs()
 
     DX12::DeferredRelease(rtPSO);
     DX12::DeferredRelease(uvVisPSO);
+    DX12::DeferredRelease(surfaceMapPSO);
+
+    DX12::DeferredRelease(bakingPSO);
 }
 
 // Creates all required render targets
@@ -625,6 +677,35 @@ void DXRPathTracer::CreateRenderTargets()
        lmInit.InitialState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE; // 初始状态为可读，烘焙时再切换
        lmInit.Name = L"Baked Light Map";
        bakedLightMap.Initialize(lmInit);
+
+        lmInit.Name = L"UV Layout Map";
+       uvLayoutMap.Initialize(lmInit);
+   }
+
+   {
+        // 创建 Surface Map (需要两个RT)
+        RenderTextureInit smInit;
+        smInit.Width = LightMapResolution;
+        smInit.Height = LightMapResolution;
+        smInit.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; // 高精度存储坐标和法线
+        smInit.MSAASamples = 1;
+        smInit.ArraySize = 1;
+        smInit.CreateUAV = false; 
+        smInit.Name = L"Surface Map";
+        surfaceMap.Initialize(smInit);
+        smInit.Name = L"Surface Map Normal";
+        surfaceMapNormal.Initialize(smInit);
+
+        // 创建 Accumulation Buffer
+        RenderTextureInit accumInit;
+        accumInit.Width = LightMapResolution;
+        accumInit.Height = LightMapResolution;
+        accumInit.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; // 高精度累加
+        accumInit.MSAASamples = 1;
+        accumInit.ArraySize = 1;
+        accumInit.CreateUAV = true;
+        accumInit.Name = L"Accumulation Buffer";
+        accumulationBuffer.Initialize(accumInit);
    }
 
     {
@@ -754,9 +835,10 @@ void DXRPathTracer::InitRayTracing()
         // RayTrace root signature
         D3D12_DESCRIPTOR_RANGE1 uavRanges[1] = {};
         uavRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        uavRanges[0].NumDescriptors = 1;
+        uavRanges[0].NumDescriptors = 4;
         uavRanges[0].BaseShaderRegister = 0;
         uavRanges[0].RegisterSpace = 0;
+        uavRanges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
         uavRanges[0].OffsetInDescriptorsFromTableStart = 0;
 
         D3D12_ROOT_PARAMETER1 rootParameters[NumRTRootParams] = {};
@@ -810,6 +892,12 @@ void DXRPathTracer::InitRayTracing()
         rootSignatureDesc.NumStaticSamplers = ArraySize_(staticSamplers);
         rootSignatureDesc.pStaticSamplers = staticSamplers;
         rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
+
+        rootParameters[RTParams_BakingCBuffer].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        rootParameters[RTParams_BakingCBuffer].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        rootParameters[RTParams_BakingCBuffer].Descriptor.RegisterSpace = 0;
+        rootParameters[RTParams_BakingCBuffer].Descriptor.ShaderRegister = 2;
+        rootParameters[RTParams_BakingCBuffer].Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC;
 
         DX12::CreateRootSignature(&rtRootSignature, rootSignatureDesc);
     }
@@ -954,6 +1042,102 @@ void DXRPathTracer::CreateRayTracingPSOs()
     }
 
     DX12::Release(psoProps);
+
+    // --- 新增代码 开始: 创建 Baking DXR PSO ---
+
+    // 1. 使用 StateObjectBuilder 构建用于烘焙的 PSO
+    StateObjectBuilder bakingBuilder;
+    bakingBuilder.Init(12); // 子对象数量可以和 rtPSO 保持类似
+
+    {
+        // 使用我们新编译的 bakingLib
+        D3D12_DXIL_LIBRARY_DESC dxilDesc = { };
+        dxilDesc.DXILLibrary = bakingLib.ByteCode();
+        bakingBuilder.AddSubObject(dxilDesc);
+    }
+
+    // 复用已有的命中组定义，因为命中物体后的物理逻辑是相同的
+    {
+        D3D12_HIT_GROUP_DESC hitDesc = { };
+        hitDesc.Type = D3D12_HIT_GROUP_TYPE_TRIANGLES;
+        hitDesc.ClosestHitShaderImport = L"ClosestHitShader";
+        hitDesc.HitGroupExport = L"HitGroup";
+        bakingBuilder.AddSubObject(hitDesc);
+    }
+    {
+        D3D12_HIT_GROUP_DESC hitDesc = { };
+        hitDesc.Type = D3D12_HIT_GROUP_TYPE_TRIANGLES;
+        hitDesc.ClosestHitShaderImport = L"ClosestHitShader";
+        hitDesc.AnyHitShaderImport = L"AnyHitShader";
+        hitDesc.HitGroupExport = L"AlphaTestHitGroup";
+        bakingBuilder.AddSubObject(hitDesc);
+    }
+    {
+        D3D12_HIT_GROUP_DESC hitDesc = {};
+        hitDesc.Type = D3D12_HIT_GROUP_TYPE_TRIANGLES;
+        hitDesc.ClosestHitShaderImport = L"ShadowHitShader";
+        hitDesc.HitGroupExport = L"ShadowHitGroup";
+        bakingBuilder.AddSubObject(hitDesc);
+    }
+    {
+        D3D12_HIT_GROUP_DESC hitDesc = {};
+        hitDesc.Type = D3D12_HIT_GROUP_TYPE_TRIANGLES;
+        hitDesc.ClosestHitShaderImport = L"ShadowHitShader";
+        hitDesc.AnyHitShaderImport = L"ShadowAnyHitShader";
+        hitDesc.HitGroupExport = L"ShadowAlphaTestHitGroup";
+        bakingBuilder.AddSubObject(hitDesc);
+    }
+    
+    // 复用已有的着色器配置 (Payload 大小等)
+    {
+        D3D12_RAYTRACING_SHADER_CONFIG shaderConfig = { };
+        shaderConfig.MaxAttributeSizeInBytes = 2 * sizeof(float);
+        shaderConfig.MaxPayloadSizeInBytes = 4 * sizeof(float) + 4 * sizeof(uint32);
+        bakingBuilder.AddSubObject(shaderConfig);
+    }
+    
+    // 复用已有的全局根签名，因为它已经包含了所有我们需要的资源绑定
+    {
+        D3D12_GLOBAL_ROOT_SIGNATURE globalRSDesc = { };
+        globalRSDesc.pGlobalRootSignature = rtRootSignature;
+        bakingBuilder.AddSubObject(globalRSDesc);
+    }
+
+    // 复用已有的管线配置 (光线递归深度)
+    {
+        D3D12_RAYTRACING_PIPELINE_CONFIG configDesc = { };
+        configDesc.MaxTraceRecursionDepth = AppSettings::MaxPathLengthSetting;
+        bakingBuilder.AddSubObject(configDesc);
+    }
+    
+    // 创建烘焙管线状态对象
+    bakingPSO = bakingBuilder.CreateStateObject(D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE);
+    bakingPSO->SetName(L"Baking PSO");
+
+    // 2. 从新的 Baking PSO 中获取着色器标识符
+    ID3D12StateObjectProperties* bakingPsoProps = nullptr;
+    bakingPSO->QueryInterface(IID_PPV_ARGS(&bakingPsoProps));
+    
+    // 我们只需要新的 RayGen 着色器的ID，因为 Hit/Miss Table 将被复用
+    const void* bakeRayGenID = bakingPsoProps->GetShaderIdentifier(L"BakeRayGen");
+    
+    DX12::Release(bakingPsoProps);
+
+    // 3. 创建烘焙专用的光线生成着色器表 (RayGen Shader Table)
+    {
+        ShaderIdentifier bakeRayGenRecords[1] = { ShaderIdentifier(bakeRayGenID) };
+
+        StructuredBufferInit sbInit;
+        sbInit.Stride = sizeof(ShaderIdentifier);
+        sbInit.NumElements = ArraySize_(bakeRayGenRecords);
+        sbInit.InitData = bakeRayGenRecords;
+        sbInit.ShaderTable = true;
+        sbInit.Name = L"Baking Ray Gen Shader Table";
+        bakingRayGenTable.Initialize(sbInit);
+    }
+
+    // --- 新增代码 结束 ---
+    
 }
 
 void DXRPathTracer::Update(const Timer& timer)
@@ -1084,6 +1268,21 @@ void DXRPathTracer::Update(const Timer& timer)
 
 void DXRPathTracer::Render(const Timer& timer)
 {
+    if (isBaking)
+    {
+        RenderBakingPass();
+    }
+
+    if (uvVisualizationRequested)
+    {
+        if (currentModel && currentModel->GetLightmappedVertexCount() > 0)
+        {
+            VisualizeUVs(currentModel);
+            textureToPreview = TextureToPreview::UVLayout; // 自动切换预览
+        }
+        uvVisualizationRequested = false;
+}
+
     if(buildAccelStructure)
         BuildRTAccelerationStructure();
     else if(lastBuildAccelStructureFrame + DX12::RenderLatency == DX12::CurrentCPUFrame)
@@ -1123,26 +1322,6 @@ void DXRPathTracer::Render(const Timer& timer)
 
         // 6. 将标志设为false，确保此代码块不再执行
         isFirstFrame = false;
-    }
-
-    if (bakeRequested)
-    {
-        RenderBakingPass();
-        bakeRequested = false; // 重置请求，这样它只执行一次
-    }
-
-    if (uvVisualizationRequested)
-    {
-        // 确保当前有模型，并且模型有光照贴图数据
-        if(currentModel != nullptr && currentModel->GetLightmappedVertexCount() > 0)
-        {
-            // 调用我们之前写好的可视化函数
-            VisualizeUVs(currentModel);
-            WriteLog("UV visualization has been rendered to the lightmap texture.");
-        }
-        
-        // 重置标志，这样它只会在点击后执行一次，而不是每一帧都执行
-        uvVisualizationRequested = false;
     }
 
     if(AppSettings::EnableRayTracing)
@@ -1445,34 +1624,169 @@ void DXRPathTracer::RenderResolve()
     resolveTarget.MakeReadable(cmdList);
 }
 
-void DXRPathTracer::RenderBakingPass()
+void DXRPathTracer::RenderSurfaceMap()
 {
-    ID3D12GraphicsCommandList* cmdList = DX12::CmdList;
-    PIXMarker marker(cmdList, "Baking Pass");
+    PIXMarker marker(DX12::CmdList, "Render Surface Map");
+    ProfileBlock profileBlock(DX12::CmdList, "Render Surface Map");
 
-    // 1. 将资源从“可读”状态转换到“可写(UAV)”状态
-    // 这个函数假设资源之前是可读的，这在我们的流程中是成立的。
+    ID3D12GraphicsCommandList* cmdList = DX12::CmdList;
+
+    if (currentModel == nullptr || currentModel->GetLightmappedVertexCount() == 0)
+        return;
+
+    // 1. 将两个资源都切换到渲染目标状态
+    surfaceMap.MakeWritable(cmdList);
+    surfaceMapNormal.MakeWritable(cmdList); // <-- 修改点
+
+    // 2. 设置渲染目标 (现在我们有两个独立的RTV了)
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandles[2] = { surfaceMap.RTV, surfaceMapNormal.RTV }; // <-- 修改点
+    cmdList->OMSetRenderTargets(2, rtvHandles, false, nullptr);
+
+    // 3. 分别清除两个渲染目标
+    const float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    cmdList->ClearRenderTargetView(rtvHandles[0], clearColor, 0, nullptr);
+    cmdList->ClearRenderTargetView(rtvHandles[1], clearColor, 0, nullptr); // <-- 修改点
+
+    // 4. 设置视口和渲染状态 (这部分不变)
+    DX12::SetViewport(cmdList, surfaceMap.Width(), surfaceMap.Height());
+    cmdList->SetPipelineState(surfaceMapPSO);
+    cmdList->SetGraphicsRootSignature(surfaceMapRS);
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    // 5. 绑定几何体数据 (这部分不变)
+    D3D12_VERTEX_BUFFER_VIEW vbView = currentModel->GetLightmappedVertexBuffer().VBView();
+    D3D12_INDEX_BUFFER_VIEW ibView = currentModel->GetLightmappedIndexBuffer().IBView();
+    cmdList->IASetVertexBuffers(0, 1, &vbView);
+    cmdList->IASetIndexBuffer(&ibView);
+
+    // 6. 绘制网格 (这部分不变)
+    const Array<Mesh>& meshesToDraw = currentModel->GetLightmappedMeshes();
+    for (const Mesh& mesh : meshesToDraw)
+    {
+        cmdList->DrawIndexedInstanced(mesh.NumIndices(), 1, mesh.IndexOffset(), mesh.VertexOffset(), 0);
+    }
+
+    // 7. 将两个资源都切换回可读状态
+    surfaceMap.MakeReadable(cmdList);
+    surfaceMapNormal.MakeReadable(cmdList); // <-- 修改点
+}
+
+void DXRPathTracer::RenderBakingPass_Progressive()
+{
+    PIXMarker marker(DX12::CmdList, "Baking Pass - Progressive DXR");
+    ProfileBlock profileBlock(DX12::CmdList, "Baking Pass - Progressive DXR");
+
+    ID3D12GraphicsCommandList4* cmdList = DX12::CmdList;
+
+    if (currentModel == nullptr)
+        return;
+
+    // 1. 绑定根签名和全局资源
+    cmdList->SetComputeRootSignature(rtRootSignature);
+    DX12::BindGlobalSRVDescriptorTable(cmdList, RTParams_StandardDescriptors, CmdListMode::Compute);
+    cmdList->SetComputeRootShaderResourceView(RTParams_SceneDescriptor, rtTopLevelAccelStructure.GPUAddress);
+    
+    // 2. 绑定UAV资源 (累加缓冲和最终光照贴图)
+    // 你的根签名定义了UAV表有4个描述符。
+    // 我们将 u0 绑定到 accumulationBuffer，u1 绑定到 bakedLightMap。
+    D3D12_CPU_DESCRIPTOR_HANDLE uavs[4] = {};
+    uavs[0] = accumulationBuffer.UAV;
+    uavs[1] = bakedLightMap.UAV;
+    // 用最后一个有效的UAV填充剩余的槽位，以满足根签名要求
+    uavs[2] = bakedLightMap.UAV;
+    uavs[3] = bakedLightMap.UAV;
+    DX12::BindTempDescriptorTable(cmdList, uavs, ArraySize_(uavs), RTParams_UAVDescriptor, CmdListMode::Compute);
+
+    // 3. 绑定常量缓冲
+    // a. 绑定主光追常量 (复用RayTraceConstants)
+    RayTraceConstants rtConstants = {};
+    rtConstants.SunDirectionWS = AppSettings::SunDirection;
+    rtConstants.SunIrradiance = skyCache.SunIrradiance;
+    rtConstants.CosSunAngularRadius = std::cos(DegToRad(AppSettings::SunSize));
+    rtConstants.SinSunAngularRadius = std::sin(DegToRad(AppSettings::SunSize));
+    rtConstants.SunRenderColor = skyCache.SunRenderColor;
+    rtConstants.CameraPosWS = camera.Position(); // 虽然烘焙不依赖相机，但可以填入
+    rtConstants.VtxBufferIdx = currentModel->VertexBuffer().SRV; // 注意：这里用的是原始模型数据
+    rtConstants.IdxBufferIdx = currentModel->IndexBuffer().SRV;
+    rtConstants.GeometryInfoBufferIdx = rtGeoInfoBuffer.SRV;
+    rtConstants.MaterialBufferIdx = meshRenderer.MaterialBuffer().SRV;
+    rtConstants.SkyTextureIdx = skyCache.CubeMap.SRV;
+    rtConstants.NumLights = Min<uint32>(uint32(spotLights.Size()), AppSettings::MaxLightClamp);
+    // surfaceMap 会通过全局SRV表绑定，所以它的索引由框架自动管理
+    DX12::BindTempConstantBuffer(cmdList, rtConstants, RTParams_CBuffer, CmdListMode::Compute);
+
+    // b. 绑定烘焙专用常量
+    struct BakingConstants
+    {
+        uint32 SampleIndex;
+        uint32 SurfaceMapPositionIdx; // <-- 将原来的 SurfaceMapIdx 重命名
+        uint32 SurfaceMapNormalIdx;   // <-- 新增这一行
+        uint32 Padding1;
+    };
+
+    BakingConstants bakingConstants = {};
+    bakingConstants.SampleIndex = bakingSampleIndex;
+    bakingConstants.SurfaceMapPositionIdx = surfaceMap.SRV(); // <-- 修改点
+    bakingConstants.SurfaceMapNormalIdx = surfaceMapNormal.SRV(); // <-- 新增这一行
+    DX12::BindTempConstantBuffer(cmdList, bakingConstants, RTParams_BakingCBuffer, CmdListMode::Compute);
+
+    
+    // c. 绑定其他常量
+    spotLightBuffer.SetAsComputeRootParameter(cmdList, RTParams_LightCBuffer);
+    AppSettings::BindCBufferCompute(cmdList, RTParams_AppSettings);
+
+    // 4. 将UAV资源切换到可写状态
+    accumulationBuffer.MakeWritableUAV(cmdList);
     bakedLightMap.MakeWritableUAV(cmdList);
 
-    // 2. 执行UAV操作（填充为红色）
-    // 获取CPU句柄
-    D3D12_CPU_DESCRIPTOR_HANDLE uavCPUHandle = bakedLightMap.UAV;
+    // 5. 设置DXR管线状态
+    cmdList->SetPipelineState1(bakingPSO);
 
-    // 将CPU句柄复制到GPU可见的临时堆中，并获取其GPU句柄
-    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandles[] = { uavCPUHandle };
-    D3D12_GPU_DESCRIPTOR_HANDLE uavGPUHandle = DX12::TempDescriptorTable(cpuHandles, 1);
+    // 6. 配置并分发光线
+    D3D12_DISPATCH_RAYS_DESC dispatchDesc = {};
+    dispatchDesc.RayGenerationShaderRecord = bakingRayGenTable.ShaderRecord(0);
+    dispatchDesc.MissShaderTable = rtMissTable.ShaderTable();
+    dispatchDesc.HitGroupTable = rtHitTable.ShaderTable();
+    dispatchDesc.Width = LightMapResolution;
+    dispatchDesc.Height = LightMapResolution;
+    dispatchDesc.Depth = 1;
 
-    // 执行清除操作
-    const float clearColor[4] = { 1.0f, 0.0f, 0.0f, 1.0f }; // 红色
-    cmdList->ClearUnorderedAccessViewFloat(uavGPUHandle, uavCPUHandle, bakedLightMap.Resource(), clearColor, 0, nullptr);
+    cmdList->DispatchRays(&dispatchDesc);
 
-    // 3. 插入一个UAV屏障，确保所有写入完成
-    // 注意：这里的屏障不是状态切换，而是确保GPU的UAV写入操作完成，以便后续步骤可以安全地读取或切换状态。
-    bakedLightMap.UAVBarrier(cmdList);
+    // 7. 将UAV切换回可读状态，以便UI显示
+    accumulationBuffer.MakeReadableUAV(cmdList);
+    bakedLightMap.MakeReadableUAV(cmdList);
+}
 
-    // 4. 将资源从“可写(UAV)”状态转换回“可读”状态
-    // 调用正确的函数 MakeReadableUAV，它知道资源当前处于 UNORDERED_ACCESS 状态
-    bakedLightMap.MakeReadableUAV(cmdList); 
+void DXRPathTracer::RenderBakingPass()
+{
+    PIXMarker marker(DX12::CmdList, "Baking Pass");
+
+    // 烘焙流程的总指挥
+    if (isBaking)
+    {
+        // 如果是第一帧，执行一次性的预烘焙
+        if (bakingSampleIndex == 0)
+        {
+            // 1. 清空累加器和输出结果
+            accumulationBuffer.MakeWritable(DX12::CmdList);
+            bakedLightMap.MakeWritable(DX12::CmdList);
+            const float clearColor[] = { 0, 0, 0, 0 };
+            DX12::CmdList->ClearRenderTargetView(accumulationBuffer.RTV, clearColor, 0, nullptr);
+            DX12::CmdList->ClearRenderTargetView(bakedLightMap.RTV, clearColor, 0, nullptr);
+            accumulationBuffer.MakeReadable(DX12::CmdList);
+            bakedLightMap.MakeReadable(DX12::CmdList);
+
+            // 2. 执行表面映射图生成
+            RenderSurfaceMap();
+        }
+
+        // 3. 执行一帧渐进式烘焙
+        RenderBakingPass_Progressive();
+
+        // 4. 增加采样计数
+        bakingSampleIndex++;
+    }
 }
 
 void DXRPathTracer::RenderRayTracing()
@@ -1487,7 +1801,17 @@ void DXRPathTracer::RenderRayTracing()
     DX12::BindGlobalSRVDescriptorTable(cmdList, RTParams_StandardDescriptors, CmdListMode::Compute);
 
     cmdList->SetComputeRootShaderResourceView(RTParams_SceneDescriptor, rtTopLevelAccelStructure.GPUAddress);
-    DX12::BindTempDescriptorTable(cmdList, &rtTarget.UAV, 1, RTParams_UAVDescriptor, CmdListMode::Compute);
+
+    // 3. 构建完整的描述符数组
+    D3D12_CPU_DESCRIPTOR_HANDLE uavs[4] = {};
+    uavs[0] = rtTarget.UAV;
+    uavs[1] = rtTarget.UAV;
+    uavs[2] = rtTarget.UAV;
+    uavs[3] = rtTarget.UAV;
+
+    // 4. 绑定这个包含4个描述符的完整表
+    DX12::BindTempDescriptorTable(cmdList, uavs, ArraySize_(uavs), RTParams_UAVDescriptor, CmdListMode::Compute);
+
 
     RayTraceConstants rtConstants;
     rtConstants.InvViewProjection = Float4x4::Invert(camera.ViewProjectionMatrix());
@@ -1537,33 +1861,7 @@ void DXRPathTracer::RenderHUD(const Timer& timer)
 {
     ID3D12GraphicsCommandList* cmdList = DX12::CmdList;
     PIXMarker pixMarker(cmdList, "HUD Pass");
-
-    Float2 viewportSize;
-    viewportSize.x = float(swapChain.Width());
-    viewportSize.y = float(swapChain.Height());
-    spriteRenderer.Begin(cmdList, viewportSize, SpriteFilterMode::Point, SpriteBlendMode::AlphaBlend);
-
-    Float2 textPos = Float2(25.0f, 25.0f);
-    std::wstring fpsText = MakeString(L"Frame Time: %.2fms (%u FPS)", 1000.0f / fps, fps);
-    spriteRenderer.RenderText(cmdList, font, fpsText.c_str(), textPos, Float4(1.0f, 1.0f, 0.0f, 1.0f));
-
-    if (showLightmapWindow)
-    {
-        // 我们直接使用 lightmapWindowRect 作为纹理的目标绘制区域
-        // SpriteTransform 的 Scale 是基于纹理原始大小的乘数，所以我们用目标尺寸除以原始尺寸
-        Float2 scale;
-        scale.x = lightmapWindowRect.z / bakedLightMap.Width();
-        scale.y = lightmapWindowRect.w / bakedLightMap.Height();
-
-        SpriteTransform transform;
-        transform.Position = Float2(lightmapWindowRect.x, lightmapWindowRect.y);
-        transform.Scale = scale;
-
-        spriteRenderer.Render(cmdList, &bakedLightMap.Texture, transform);
-    }
-
-    spriteRenderer.End();
-
+    
     // Draw the progress bar
     const uint32 totalNumSamples = uint32(AppSettings::SqrtNumSamples * AppSettings::SqrtNumSamples);
     if(rtCurrSampleIdx < totalNumSamples && AppSettings::ShowProgressBar)
@@ -1659,17 +1957,67 @@ void DXRPathTracer::RenderHUD(const Timer& timer)
             lightmapWindowRect.w = finalHeight;
 
             // 在窗口里添加按钮
-            if (ImGui::Button("Start Baking"))
+            if (isBaking)
             {
-                bakeRequested = true;
+                if (ImGui::Button("Stop Baking"))
+                    isBaking = false;
+            }
+            else
+            {
+                if (ImGui::Button("Start Baking"))
+                {
+                    isBaking = true;
+                    bakingSampleIndex = 0; // 重置计数器
+                }
             }
 
             ImGui::SameLine(); // 让下一个按钮在同一行
-            if (ImGui::Button("Visualize UV Layout"))
+            if (ImGui::Button("Visualize UVs"))
             {
                 uvVisualizationRequested = true;
+                textureToPreview = TextureToPreview::UVLayout;
             }
-            ImGui::Separator();
+
+            const char* items[] = { "UV Layout", "Surface Map", "Accumulation Buffer", "Final Lightmap" };
+            static int currentItem = 0;
+            if(ImGui::Combo("Preview", &currentItem, items, IM_ARRAYSIZE(items)))
+            {
+                textureToPreview = (TextureToPreview)currentItem;
+            }
+
+            // 根据选择来决定 spriteRenderer 绘制哪个纹理
+            RenderTexture* previewTexture = &bakedLightMap;
+            if (textureToPreview == TextureToPreview::SurfaceMap)
+                previewTexture = &surfaceMap;
+            else if (textureToPreview == TextureToPreview::Accumulation)
+                previewTexture = &accumulationBuffer;
+            else if (textureToPreview == TextureToPreview::UVLayout)
+                previewTexture = &uvLayoutMap;
+            else if (textureToPreview == TextureToPreview::FinalLightmap)
+                previewTexture = &bakedLightMap;
+            else
+                previewTexture = &bakedLightMap;
+
+            Float2 viewportSize;
+            viewportSize.x = float(swapChain.Width());
+            viewportSize.y = float(swapChain.Height());
+            spriteRenderer.Begin(cmdList, viewportSize, SpriteFilterMode::Point, SpriteBlendMode::AlphaBlend);
+
+            Float2 textPos = Float2(25.0f, 25.0f);
+            std::wstring fpsText = MakeString(L"Frame Time: %.2fms (%u FPS)", 1000.0f / fps, fps);
+            spriteRenderer.RenderText(cmdList, font, fpsText.c_str(), textPos, Float4(1.0f, 1.0f, 0.0f, 1.0f));
+            // 我们直接使用 lightmapWindowRect 作为纹理的目标绘制区域
+            // SpriteTransform 的 Scale 是基于纹理原始大小的乘数，所以我们用目标尺寸除以原始尺寸
+            Float2 scale;
+            scale.x = lightmapWindowRect.z / bakedLightMap.Width();
+            scale.y = lightmapWindowRect.w / bakedLightMap.Height();
+
+            SpriteTransform transform;
+            transform.Position = Float2(lightmapWindowRect.x, lightmapWindowRect.y);
+            transform.Scale = scale;
+
+            spriteRenderer.Render(cmdList, &previewTexture->Texture, transform);
+            spriteRenderer.End();
         }
 
         ImGui::End();
