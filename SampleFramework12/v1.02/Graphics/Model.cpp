@@ -17,13 +17,36 @@
 #include "..\\Serialization.h"
 #include "..\\FileIO.h"
 #include "Textures.h"
+#include <chrono>
 #include <cstddef>
+
+#include <xatlas.h>
 
 using std::string;
 using std::wstring;
 using std::vector;
 using std::map;
 using std::wifstream;
+
+const wchar_t* XatlasErrorToString(xatlas::AddMeshError error)
+{
+    switch (error)
+    {
+        case xatlas::AddMeshError::Success:
+            return L"Success";
+        case xatlas::AddMeshError::Error:
+            return L"Unspecified error";
+        case xatlas::AddMeshError::IndexOutOfRange:
+            return L"Index out of range (an index was >= vertexCount)";
+        case xatlas::AddMeshError::InvalidFaceVertexCount:
+            return L"Invalid face vertex count (must be >= 3, project may not support lines/points)";
+        case xatlas::AddMeshError::InvalidIndexCount:
+            return L"Invalid index count (the total number of indices is not divisible by 3)";
+        default:
+            return L"Unknown error code";
+    }
+}
+
 
 namespace SampleFramework12
 {
@@ -582,7 +605,118 @@ void Model::CreateWithAssimp(const ModelLoadSettings& settings)
         idxOffset += meshes[i].NumIndices() * indexSize;
     }
 
+    // --- xatlas 集成逻辑，从这里开始 ---
+    WriteLog("Starting xatlas UV unwrapping...");
+
+    // 1. 创建 xatlas 实例
+    xatlas::Atlas *atlas = xatlas::Create();
+
+    auto startTime = std::chrono::high_resolution_clock::now();
+
+    // 2. 添加网格到 xatlas
+    for (uint64 i = 0; i < meshes.Size(); ++i)
+    {
+        const Mesh& mesh = meshes[i];
+        xatlas::MeshDecl meshDecl;
+        meshDecl.vertexCount = mesh.NumVertices();
+        
+        // 告诉 xatlas 顶点数据的位置、偏移和步长
+        meshDecl.vertexPositionData = (void*)(vertices.Data() + mesh.VertexOffset());
+        meshDecl.vertexPositionStride = sizeof(MeshVertex);
+        meshDecl.vertexNormalData = (void*)((uint8_t*)(vertices.Data() + mesh.VertexOffset()) + offsetof(MeshVertex, Normal));
+        meshDecl.vertexNormalStride = sizeof(MeshVertex);
+        meshDecl.vertexUvData = (void*)((uint8_t*)(vertices.Data() + mesh.VertexOffset()) + offsetof(MeshVertex, UV));
+        meshDecl.vertexUvStride = sizeof(MeshVertex);
+        
+        // 告诉 xatlas 索引数据
+        meshDecl.indexCount = mesh.NumIndices();
+        meshDecl.indexData = (void*)(indices.Data() + mesh.IndexOffset() * IndexSize());
+        meshDecl.indexFormat = (IndexSize() == 2) ? xatlas::IndexFormat::UInt16 : xatlas::IndexFormat::UInt32;
+        
+        xatlas::AddMeshError error = xatlas::AddMesh(atlas, meshDecl);
+        if (error != xatlas::AddMeshError::Success)
+        {
+            WriteLog(L"xatlas::AddMesh failed for mesh %llu with error: %s", i, XatlasErrorToString(error));
+        }
+        Assert_(error == xatlas::AddMeshError::Success);
+    }
+
+    // 3. 生成光照贴图UV
+    // 你可以在这里设置各种选项，暂时使用默认值
+    xatlas::Generate(atlas);
+
+    // 4. 从 xatlas 的输出重建我们的光照贴图专用几何体
+    // 首先，计算新的总顶点数和索引数
+    uint32 totalNewVertices = 0;
+    uint32 totalNewIndices = 0;
+    for (uint32 i = 0; i < atlas->meshCount; i++) {
+        totalNewVertices += atlas->meshes[i].vertexCount;
+        totalNewIndices += atlas->meshes[i].indexCount;
+    }
+
+    // 初始化我们新增的成员变量
+    lightmappedVertices.Init(totalNewVertices);
+    lightmappedIndices.Init(totalNewIndices * sizeof(uint32)); // xatlas 输出总是 32-bit 索引
+    lightmappedMeshes.Init(atlas->meshCount);
+
+    uint32* newIndices = (uint32*)lightmappedIndices.Data();
+    uint32 currentVertexOffset = 0;
+    uint32 currentIndexOffset = 0;
+    
+    for (uint32 i = 0; i < atlas->meshCount; i++)
+    {
+        const xatlas::Mesh& outputMesh = atlas->meshes[i];
+        
+        // 填充新的顶点数据
+        for (uint32 j = 0; j < outputMesh.vertexCount; j++)
+        {
+            const xatlas::Vertex& xatlasVertex = outputMesh.vertexArray[j];
+            
+            // xref 指向原始顶点数组中的索引，这是连接新旧数据的桥梁
+            const MeshVertex& originalVertex = vertices[meshes[i].VertexOffset() + xatlasVertex.xref];
+
+            MeshVertex& newVertex = lightmappedVertices[currentVertexOffset + j];
+            newVertex.Position = originalVertex.Position;
+            newVertex.Normal = originalVertex.Normal;
+            newVertex.Tangent = originalVertex.Tangent;
+            newVertex.Bitangent = originalVertex.Bitangent;
+            newVertex.UV = originalVertex.UV; // 保留原始UV
+            newVertex.LightmapUV = Float2(xatlasVertex.uv[0] / atlas->width, xatlasVertex.uv[1] / atlas->height); // 设置新的LightmapUV
+        }
+        
+        // 填充新的索引数据
+        for (uint32 j = 0; j < outputMesh.indexCount; j++)
+        {
+            newIndices[currentIndexOffset + j] = outputMesh.indexArray[j] + currentVertexOffset;
+        }
+
+        // 更新光照贴图网格信息
+        Mesh& newMesh = lightmappedMeshes[i];
+        newMesh.meshParts.Init(meshes[i].NumMeshParts());
+        for(uint64 p = 0; p < newMesh.NumMeshParts(); ++p)
+            newMesh.meshParts[p] = meshes[i].MeshParts()[p]; // 材质信息等可以继承过来
+            
+        newMesh.numVertices = outputMesh.vertexCount;
+        newMesh.numIndices = outputMesh.indexCount;
+        newMesh.vtxOffset = currentVertexOffset;
+        newMesh.idxOffset = currentIndexOffset;
+        newMesh.indexType = IndexType::Index32Bit; // xatlas 输出是 32-bit
+        
+        currentVertexOffset += outputMesh.vertexCount;
+        currentIndexOffset += outputMesh.indexCount;
+    }
+
+    // 5. 清理 xatlas
+    xatlas::Destroy(atlas);
+
+    auto endTime = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
+    WriteLog("xatlas UV unwrapping finished in %lld ms. Original vertices: %u, New vertices: %u", duration, vertices.Size(), lightmappedVertices.Size());
+    // --- xatlas 集成逻辑结束 ---
+
     CreateBuffers();
+
+    CreateLightmappedBuffers();
 
     WriteLog("Finished loading scene '%ls'", filePath);
 }
@@ -672,6 +806,11 @@ void Model::Shutdown()
     for(uint64 i = 0; i < meshes.Size(); ++i)
         meshes[i].Shutdown();
     meshes.Shutdown();
+
+    for (uint64 i = 0; i < lightmappedMeshes.Size(); ++i)
+        lightmappedMeshes[i].Shutdown();
+    lightmappedMeshes.Shutdown();
+
     meshMaterials.Shutdown();
     for(uint64 i = 0; i < materialTextures.Count(); ++i)
     {
@@ -687,6 +826,11 @@ void Model::Shutdown()
     indexBuffer.Shutdown();
     vertices.Shutdown();
     indices.Shutdown();
+
+    lightmappedVertexBuffer.Shutdown();
+    lightmappedIndexBuffer.Shutdown();
+    lightmappedVertices.Shutdown();
+    lightmappedIndices.Shutdown();
 }
 
 const D3D12_INPUT_ELEMENT_DESC* Model::InputElements()
@@ -735,6 +879,99 @@ void Model::CreateBuffers()
         idxOffset += meshes[i].NumIndices();
     }
 }
+
+// --- 新增代码 开始 ---
+
+void Model::CreateLightmappedBuffers()
+{
+    Assert_(lightmappedMeshes.Size() > 0);
+
+    // 为光照贴图顶点数据创建结构化缓冲
+    StructuredBufferInit sbInit;
+    sbInit.Stride = sizeof(MeshVertex);
+    sbInit.NumElements = lightmappedVertices.Size();
+    sbInit.InitData = lightmappedVertices.Data();
+    lightmappedVertexBuffer.Initialize(sbInit);
+
+    // 为光照贴图索引数据创建格式化缓冲 (注意总是 32-bit)
+    FormattedBufferInit fbInit;
+    fbInit.Format = DXGI_FORMAT_R32_UINT;
+    fbInit.NumElements = lightmappedIndices.Size() / sizeof(uint32);
+    fbInit.InitData = lightmappedIndices.Data();
+    lightmappedIndexBuffer.Initialize(fbInit);
+
+    // 为每个光照贴图网格设置正确的GPU缓冲视图
+    const uint64 numMeshes = lightmappedMeshes.Size();
+    for (uint64 i = 0; i < numMeshes; ++i)
+    {
+        uint64 vbOffset = lightmappedMeshes[i].vtxOffset * sizeof(MeshVertex);
+        uint64 ibOffset = lightmappedMeshes[i].idxOffset * sizeof(uint32);
+        lightmappedMeshes[i].InitCommon(&lightmappedVertices[lightmappedMeshes[i].vtxOffset], 
+                                         &lightmappedIndices[ibOffset], 
+                                         lightmappedVertexBuffer.GPUAddress + vbOffset, 
+                                         lightmappedIndexBuffer.GPUAddress + ibOffset, 
+                                         lightmappedMeshes[i].vtxOffset, 
+                                         lightmappedMeshes[i].idxOffset);
+    }
+}
+
+// --- 新增代码 结束 ---
+
+void Model::SetActiveGeometry(bool useLightmapGeo)
+{
+    useLightmapGeometry = useLightmapGeo;
+}
+
+const StructuredBuffer& Model::GetActiveVertexBuffer() const
+{
+    // 根据标志位，返回对应的顶点缓冲
+    return useLightmapGeometry ? lightmappedVertexBuffer : vertexBuffer;
+}
+
+const FormattedBuffer& Model::GetActiveIndexBuffer() const
+{
+    // 根据标志位，返回对应的索引缓冲
+    return useLightmapGeometry ? lightmappedIndexBuffer : indexBuffer;
+}
+
+const Array<Mesh>& Model::GetActiveMeshes() const
+{
+    // 根据标志位，返回对应的网格数组
+    return useLightmapGeometry ? lightmappedMeshes : meshes;
+}
+
+uint64 Model::GetActiveVertexCount() const
+{
+    return useLightmapGeometry ? lightmappedVertices.Size() : vertices.Size();
+}
+
+uint64 Model::GetActiveIndexCount() const
+{
+    return useLightmapGeometry ? lightmappedIndices.Size() / IndexSize() : indices.Size() / IndexSize();
+}
+
+
+const StructuredBuffer& Model::GetLightmappedVertexBuffer() const
+{
+    return lightmappedVertexBuffer;
+}
+
+const FormattedBuffer& Model::GetLightmappedIndexBuffer() const
+{
+    return lightmappedIndexBuffer;
+}
+
+const Array<Mesh>& Model::GetLightmappedMeshes() const
+{
+    return lightmappedMeshes;
+}
+
+uint64 Model::GetLightmappedVertexCount() const
+{
+    return lightmappedVertices.Size();
+}
+
+// --- 新增代码 结束 ---
 
 // == Geometry helpers ============================================================================
 

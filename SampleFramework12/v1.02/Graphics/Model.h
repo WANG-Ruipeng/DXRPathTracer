@@ -326,9 +326,23 @@ public:
         indexType = IndexType(idxType);
     }
 
+    // Set active geometry
+    void CreateLightmappedBuffers();
+    void SetActiveGeometry(bool useLightmapGeo);
+    const StructuredBuffer& GetActiveVertexBuffer() const;
+    const FormattedBuffer& GetActiveIndexBuffer() const;
+    const Array<Mesh>& GetActiveMeshes() const;
+    uint64 GetActiveVertexCount() const;
+    uint64 GetActiveIndexCount() const;
+
+    const StructuredBuffer& GetLightmappedVertexBuffer() const;
+    const FormattedBuffer& GetLightmappedIndexBuffer() const;
+    const Array<Mesh>& GetLightmappedMeshes() const;
+    uint64 GetLightmappedVertexCount() const;
+
 protected:
 
-        void CreateBuffers();
+    void CreateBuffers();
 
     Array<Mesh> meshes;
     Array<MeshMaterial> meshMaterials;
@@ -344,6 +358,15 @@ protected:
     Array<MeshVertex> vertices;
     Array<uint8> indices;
     IndexType indexType = IndexType::Index16Bit;
+
+    // Lightmapped geometry
+    StructuredBuffer lightmappedVertexBuffer;
+    FormattedBuffer lightmappedIndexBuffer;
+    Array<MeshVertex> lightmappedVertices;
+    Array<uint8> lightmappedIndices;
+    Array<Mesh> lightmappedMeshes;
+
+    bool useLightmapGeometry = false;
 
     GrowableList<MaterialTexture*> materialTextures;
 };

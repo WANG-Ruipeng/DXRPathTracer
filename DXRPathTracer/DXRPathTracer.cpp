@@ -220,6 +220,23 @@ void DXRPathTracer::Initialize()
     skybox.Initialize();
 
     postProcessor.Initialize();
+    {
+        uvVisVS = CompileFromFile(L"UVVisualizer.hlsl", "VSMain", ShaderType::Vertex);
+        uvVisPS = CompileFromFile(L"UVVisualizer.hlsl", "PSMain", ShaderType::Pixel);
+
+        // --- 新增代码：为 UV 可视化器创建空白的根签名 ---
+        D3D12_ROOT_SIGNATURE_DESC1 rootSignatureDesc = {};
+        rootSignatureDesc.NumParameters = 0;
+        rootSignatureDesc.pParameters = nullptr;
+        rootSignatureDesc.NumStaticSamplers = 0;
+        rootSignatureDesc.pStaticSamplers = nullptr;
+        rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+        DX12::CreateRootSignature(&uvVisRS, rootSignatureDesc);
+
+        // 给它起个名字，方便在调试器（如PIX）中识别
+        uvVisRS->SetName(L"UV Visualizer Root Signature");
+    }
 
     {
         // Spot light bounds and instance buffers
@@ -408,6 +425,42 @@ void DXRPathTracer::Shutdown()
     rtGeoInfoBuffer.Shutdown();
 
     bakedLightMap.Shutdown();
+    DX12::Release(uvVisRS);
+}
+
+void DXRPathTracer::VisualizeUVs(Model* model)
+{
+    ID3D12GraphicsCommandList* cmdList = DX12::CmdList;
+
+    // 1. 将 bakedLightMap 切换为渲染目标状态
+    bakedLightMap.MakeWritable(cmdList);
+
+    // 2. 清除为黑色背景
+    const float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    cmdList->ClearRenderTargetView(bakedLightMap.RTV, clearColor, 0, nullptr);
+
+    // 3. 设置渲染状态
+    cmdList->OMSetRenderTargets(1, &bakedLightMap.RTV, false, nullptr);
+    DX12::SetViewport(cmdList, bakedLightMap.Width(), bakedLightMap.Height());
+    cmdList->SetPipelineState(uvVisPSO);
+    cmdList->SetGraphicsRootSignature(uvVisRS); // 假设你已创建
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    // 4. 绑定光照贴图几何体的缓冲
+    D3D12_VERTEX_BUFFER_VIEW vbView = model->GetLightmappedVertexBuffer().VBView();
+    D3D12_INDEX_BUFFER_VIEW ibView = model->GetLightmappedIndexBuffer().IBView();
+    cmdList->IASetVertexBuffers(0, 1, &vbView);
+    cmdList->IASetIndexBuffer(&ibView);
+
+    // 5. 绘制所有网格
+    const Array<Mesh>& meshesToDraw = model->GetLightmappedMeshes();
+    for (const Mesh& mesh : meshesToDraw)
+    {
+        cmdList->DrawIndexedInstanced(mesh.NumIndices(), 1, mesh.IndexOffset(), mesh.VertexOffset(), 0);
+    }
+
+    // 6. 将 bakedLightMap 切换回可读状态，以便HUD显示
+    bakedLightMap.MakeReadable(cmdList);
 }
 
 void DXRPathTracer::CreatePSOs()
@@ -484,6 +537,31 @@ void DXRPathTracer::CreatePSOs()
         DXCall(DX12::Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&resolvePSO)));
     }
 
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+    psoDesc.pRootSignature = uvVisRS; // 使用你的简单根签名
+    psoDesc.VS = uvVisVS.ByteCode();
+    psoDesc.PS = uvVisPS.ByteCode();
+
+    // --- 这是关键 ---
+    psoDesc.RasterizerState = DX12::GetRasterizerState(RasterizerState::Wireframe); 
+
+    psoDesc.BlendState = DX12::GetBlendState(BlendState::Disabled);
+    psoDesc.DepthStencilState = DX12::GetDepthState(DepthState::Disabled); // 我们不关心深度
+    psoDesc.SampleMask = UINT_MAX;
+    psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    psoDesc.NumRenderTargets = 1;
+    psoDesc.RTVFormats[0] = bakedLightMap.Format(); // 渲染目标格式必须匹配
+    psoDesc.SampleDesc.Count = 1;
+
+    // 我们需要一个特殊的 Input Layout，只读取 LightmapUV
+    D3D12_INPUT_ELEMENT_DESC inputElements[] =
+    {
+        { "TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(MeshVertex, LightmapUV), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+    };
+    psoDesc.InputLayout = { inputElements, ArraySize_(inputElements) };
+
+    DXCall(DX12::Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&uvVisPSO)));
+
     CreateRayTracingPSOs();
 }
 
@@ -498,6 +576,7 @@ void DXRPathTracer::DestroyPSOs()
     DX12::DeferredRelease(resolvePSO);
 
     DX12::DeferredRelease(rtPSO);
+    DX12::DeferredRelease(uvVisPSO);
 }
 
 // Creates all required render targets
@@ -640,7 +719,6 @@ void DXRPathTracer::InitializeScene()
     meshRenderer.Shutdown();
     DX12::FlushGPU();
     meshRenderer.Initialize(currentModel);
-
     camera.SetPosition(SceneCameraPositions[currSceneIdx]);
     camera.SetXRotation(SceneCameraRotations[currSceneIdx].x);
     camera.SetYRotation(SceneCameraRotations[currSceneIdx].y);
@@ -1051,6 +1129,20 @@ void DXRPathTracer::Render(const Timer& timer)
     {
         RenderBakingPass();
         bakeRequested = false; // 重置请求，这样它只执行一次
+    }
+
+    if (uvVisualizationRequested)
+    {
+        // 确保当前有模型，并且模型有光照贴图数据
+        if(currentModel != nullptr && currentModel->GetLightmappedVertexCount() > 0)
+        {
+            // 调用我们之前写好的可视化函数
+            VisualizeUVs(currentModel);
+            WriteLog("UV visualization has been rendered to the lightmap texture.");
+        }
+        
+        // 重置标志，这样它只会在点击后执行一次，而不是每一帧都执行
+        uvVisualizationRequested = false;
     }
 
     if(AppSettings::EnableRayTracing)
@@ -1570,6 +1662,12 @@ void DXRPathTracer::RenderHUD(const Timer& timer)
             if (ImGui::Button("Start Baking"))
             {
                 bakeRequested = true;
+            }
+
+            ImGui::SameLine(); // 让下一个按钮在同一行
+            if (ImGui::Button("Visualize UV Layout"))
+            {
+                uvVisualizationRequested = true;
             }
             ImGui::Separator();
         }

@@ -83,6 +83,13 @@ protected:
     bool bakeRequested = false;
     Float4 lightmapWindowRect = { 25.0f, 50.0f, 512.0f, 512.0f };
     bool isFirstFrame = true;
+    bool uvVisualizationRequested = false;
+
+    CompiledShaderPtr uvVisVS;
+    CompiledShaderPtr uvVisPS;
+    ID3D12RootSignature* uvVisRS = nullptr; // 可以复用一个简单的根签名，或者新建一个
+    ID3D12PipelineState* uvVisPSO = nullptr;
+    void VisualizeUVs(Model* model);
 
     // Ray tracing resources
     CompiledShaderPtr rayTraceLib;
