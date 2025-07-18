@@ -37,11 +37,12 @@ struct RayTraceConstants
 };
 
 // C++端绑定的烘焙专用常量缓冲结构体
+// 在 Baking.hlsl 顶部
 struct BakingConstants
 {
-    uint SampleIndex;
     uint SurfaceMapPositionIdx;
     uint SurfaceMapNormalIdx;
+    uint Padding0;
     uint Padding1;
 };
 
@@ -94,11 +95,13 @@ enum RayTypes {
 // ------------------------------------------------------------------------------------------------
 //  以下所有辅助函数、命中/未命中着色器都直接从 RayTrace.hlsl 复制而来，无需修改
 // ------------------------------------------------------------------------------------------------
+// 在 Baking.hlsl 中
 static float2 SamplePoint(in uint pixelIdx, inout uint setIdx)
 {
     const uint permutation = setIdx * RayTraceCB.TotalNumPixels + pixelIdx;
     setIdx += 1;
-    return SampleCMJ2D(BakingCB.SampleIndex, AppSettings.SqrtNumSamples, AppSettings.SqrtNumSamples, permutation);
+    // 使用 RayTraceCB.CurrSampleIdx 而不是 BakingCB.SampleIndex
+    return SampleCMJ2D(RayTraceCB.CurrSampleIdx, AppSettings.SqrtNumSamples, AppSettings.SqrtNumSamples, permutation);
 }
 
 float3 PathTrace(in MeshVertex hitSurface, in Material material, in PrimaryPayload inPayload);
@@ -405,10 +408,9 @@ void BakeRayGen()
     // 计算新的累加值并写回
     float3 newSum = oldSum + newSampleColor;
     g_AccumulationBuffer[pixelCoord] = float4(newSum, 1.0f);
-    
-    // --- 修改开始 ---
+
     // 计算平均值并写入最终的光照贴图，供UI预览
-    float3 averageColor = newSum / (BakingCB.SampleIndex + 1.0f); // 将 float 改为 float3
-    g_BakedLightMap[pixelCoord] = float4(averageColor, 1.0f);     // 这个错误会自动解决
-    // --- 修改结束 ---
+    // 使用 RayTraceCB.CurrSampleIdx
+    float3 averageColor = newSum / (RayTraceCB.CurrSampleIdx + 1.0f);
+    g_BakedLightMap[pixelCoord] = float4(averageColor, 1.0f);
 }

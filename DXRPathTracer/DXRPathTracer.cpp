@@ -1698,22 +1698,32 @@ void DXRPathTracer::RenderBakingPass_Progressive()
     DX12::BindTempDescriptorTable(cmdList, uavs, ArraySize_(uavs), RTParams_UAVDescriptor, CmdListMode::Compute);
 
     // 3. 绑定常量缓冲
-    // a. 绑定主光追常量 (复用RayTraceConstants)
+    // --- 修改开始: 完整地填充 RayTraceConstants ---
     RayTraceConstants rtConstants = {};
+    // a. 填充光追/路径追踪所依赖的通用常量
+    rtConstants.InvViewProjection = Float4x4::Invert(camera.ViewProjectionMatrix()); // 虽然烘焙不依赖相机，但给一个有效值更安全
     rtConstants.SunDirectionWS = AppSettings::SunDirection;
     rtConstants.SunIrradiance = skyCache.SunIrradiance;
     rtConstants.CosSunAngularRadius = std::cos(DegToRad(AppSettings::SunSize));
     rtConstants.SinSunAngularRadius = std::sin(DegToRad(AppSettings::SunSize));
     rtConstants.SunRenderColor = skyCache.SunRenderColor;
-    rtConstants.CameraPosWS = camera.Position(); // 虽然烘焙不依赖相机，但可以填入
-    rtConstants.VtxBufferIdx = currentModel->VertexBuffer().SRV; // 注意：这里用的是原始模型数据
+    rtConstants.CameraPosWS = camera.Position();
+    
+    // b. 填充对采样函数至关重要的常量
+    rtConstants.CurrSampleIdx = bakingSampleIndex; // 使用烘焙的样本索引
+    rtConstants.TotalNumPixels = LightMapResolution * LightMapResolution; // 使用光照贴图的总像素数
+
+    // c. 填充几何体、材质等资源索引
+    rtConstants.VtxBufferIdx = currentModel->VertexBuffer().SRV;
     rtConstants.IdxBufferIdx = currentModel->IndexBuffer().SRV;
     rtConstants.GeometryInfoBufferIdx = rtGeoInfoBuffer.SRV;
     rtConstants.MaterialBufferIdx = meshRenderer.MaterialBuffer().SRV;
     rtConstants.SkyTextureIdx = skyCache.CubeMap.SRV;
     rtConstants.NumLights = Min<uint32>(uint32(spotLights.Size()), AppSettings::MaxLightClamp);
-    // surfaceMap 会通过全局SRV表绑定，所以它的索引由框架自动管理
+    
+    // 绑定这个完整的常量缓冲到 b0
     DX12::BindTempConstantBuffer(cmdList, rtConstants, RTParams_CBuffer, CmdListMode::Compute);
+    // --- 修改结束 ---
 
     // b. 绑定烘焙专用常量
     struct BakingConstants
