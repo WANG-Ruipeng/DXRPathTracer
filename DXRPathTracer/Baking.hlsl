@@ -139,6 +139,8 @@ void ShadowAnyHitShader(inout ShadowPayload payload, in HitAttributes attr)
 [shader("miss")]
 void MissShader(inout PrimaryPayload payload)
 {
+    payload.Radiance = 1.0;
+    /*
     if(AppSettings.EnableWhiteFurnaceMode)
     {
         payload.Radiance = 1.0.xxx;
@@ -148,7 +150,7 @@ void MissShader(inout PrimaryPayload payload)
         const float3 rayDir = WorldRayDirection();
         TextureCube skyTexture = TexCubeTable[RayTraceCB.SkyTextureIdx];
         payload.Radiance = AppSettings.EnableSky ? skyTexture.SampleLevel(LinearSampler, rayDir, 0.0f).xyz : float3(0.0f, 0.0f, 0.0f);
-    }
+    }*/
 }
 
 [shader("closesthit")]
@@ -334,8 +336,8 @@ void BakeRayGen()
 {
     // 获取当前线程处理的像素坐标，这对应光照贴图中的一个texel
     const uint2 pixelCoord = DispatchRaysIndex().xy;
-
-    /*g_BakedLightMap[pixelCoord] = float4(1.0, 0.0, 0.0, 1.0);
+    /*
+    g_BakedLightMap[pixelCoord] = float4(1.0, 0.0, 0.0, 1.0);
     g_AccumulationBuffer[pixelCoord] = float4(0, 0, 0, 0);
     return;*/
 
@@ -354,7 +356,20 @@ void BakeRayGen()
     }
     
     float3 worldPos = surfacePosData.xyz;
-    float3 worldNormal = normalize(surfaceNormalMap.Load(int3(pixelCoord, 0)).xyz);
+    if (any(isinf(worldPos)))
+    {
+        g_BakedLightMap[pixelCoord] = float4(0.0, 0.0, 1.0, 1.0); // 蓝色代表无穷大
+        return;
+    }
+    float3 worldNormalVec = surfaceNormalMap.Load(int3(pixelCoord, 0)).xyz;
+    if (dot(worldNormalVec, worldNormalVec) < 0.0001f)
+    {
+        // 如果是，说明这个 texel 来源于 UV 外部或数据无效。
+        // 我们就不为它产生光线，直接将它标记为黑色并跳过。
+        g_BakedLightMap[pixelCoord] = float4(0, 0, 0, 1);
+        return;
+    }
+    float3 worldNormal = normalize(worldNormalVec);
     
     // 初始化随机数种子
     uint sampleSetIdx = 0;
@@ -378,8 +393,11 @@ void BakeRayGen()
     RayDesc ray;
     ray.Origin = worldPos + worldNormal * 0.001f; // 将起点沿法线方向稍微偏移，避免自相交
     ray.Direction = rayDir;
-    ray.TMin = 0.0f;
+    ray.TMin = 0.0001f;
     ray.TMax = FP32Max;
+
+    bool bIsOriginBad = any(isinf(ray.Origin)) || any(isnan(ray.Origin));
+    bool bIsDirectionBad = any(isinf(ray.Direction)) || any(isnan(ray.Direction)) || length(ray.Direction) < 0.001f;
 
     PrimaryPayload payload;
     payload.Radiance = 0.0f;
@@ -397,6 +415,13 @@ void BakeRayGen()
     const uint hitGroupOffset = RayTypeRadiance;
     const uint hitGroupGeoMultiplier = NumRayTypes;
     const uint missShaderIdx = RayTypeRadiance;
+
+    if (bIsOriginBad|| bIsDirectionBad)
+    {
+        g_BakedLightMap[pixelCoord] = float4(0.0, 0.0, 1.0, 1.0); // 蓝色代表无穷大
+        return;
+    }
+
     TraceRay(Scene, traceRayFlags, 0xFFFFFFFF, hitGroupOffset, hitGroupGeoMultiplier, missShaderIdx, ray, payload);
 
     // 累加结果

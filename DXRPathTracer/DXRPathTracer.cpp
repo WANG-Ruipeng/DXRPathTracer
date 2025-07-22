@@ -26,11 +26,36 @@
 #include <EnkiTS/TaskScheduler_c.h>
 #include <ImGui/ImGui.h>
 #include <ImGuiHelper.h>
+#include <d3d12sdklayers.h>
 
 #include "DXRPathTracer.h"
 #include "SharedTypes.h"
+#include <wrl.h>
 
+using Microsoft::WRL::ComPtr;
 using namespace SampleFramework12;
+
+void GpuCrashDumpCallback(const void* pGpuCrashDump, const uint32_t gpuCrashDumpSize, void* pUserData)
+{
+    // 收到崩溃回调，将数据写入文件
+    std::ofstream dumpFile("DXRPathTracer_Crash.nv-gpudmp", std::ios::out | std::ios::binary);
+    if (dumpFile)
+    {
+        dumpFile.write(static_cast<const char*>(pGpuCrashDump), gpuCrashDumpSize);
+        dumpFile.close();
+    }
+}
+
+// 新增这个回调函数用于诊断
+void ShaderDebugInfoCallback(const void* pShaderDebugInfo, const uint32_t shaderDebugInfoSize, void* pUserData)
+{
+    // 只要这个函数被调用，就会在你的输出目录生成一个日志文件。
+    std::ofstream logFile("shader_debug_info_log.txt", std::ios::app);
+    logFile << "ShaderDebugInfoCallback was called! Size: " << shaderDebugInfoSize << std::endl;
+    logFile.close();
+    
+    OutputDebugStringA("ShaderDebugInfoCallback was called!\n");
+}
 
 // Model filenames
 static const wchar* ScenePaths[] =
@@ -58,7 +83,7 @@ static const uint64 NumConeSides = 16;
 
 static const bool Benchmark = false;
 
-static const uint32 LightMapResolution = 256;
+static const uint32 LightMapResolution = 16;
 
 struct HitGroupRecord
 {
@@ -201,6 +226,24 @@ void DXRPathTracer::Initialize()
         AppSettings::AlwaysResetPathTrace.SetValue(true);
         AppSettings::CurrentScene.SetValue(Scenes::SunTemple);
     }
+
+    /*
+    const uint32_t aftermathFlags =
+        GFSDK_Aftermath_FeatureFlags_EnableMarkers |
+        GFSDK_Aftermath_FeatureFlags_EnableResourceTracking |
+        GFSDK_Aftermath_FeatureFlags_GenerateShaderDebugInfo;
+
+    const GFSDK_Aftermath_Result result = GFSDK_Aftermath_DX12_Initialize(
+        GFSDK_Aftermath_Version_API,
+        aftermathFlags,
+        DX12::Device); // 此时 DX12::Device 肯定已经创建好了
+
+    if (result != GFSDK_Aftermath_Result_Success)
+    {
+        std::wcerr << L"Failed to initialize Aftermath" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+    */
 
     // Check if the device supports conservative rasterization
     D3D12_FEATURE_DATA_D3D12_OPTIONS features = { };
@@ -452,6 +495,10 @@ void DXRPathTracer::Shutdown()
     bakedLightMap.Shutdown();
     uvLayoutMap.Shutdown();
     DX12::Release(uvVisRS);
+
+    // --- 新增代码：在程序退出时禁用 Aftermath ---
+    // GFSDK_Aftermath_DisableGpuCrashDumps();
+    // --- 新增代码结束 ---
 }
 
 void DXRPathTracer::VisualizeUVs(Model* model)
@@ -1763,6 +1810,7 @@ void DXRPathTracer::RenderBakingPass_Progressive()
 
     cmdList->DispatchRays(&dispatchDesc);
 
+
     // 7. 将UAV切换回可读状态，以便UI显示
     accumulationBuffer.MakeReadableUAV(cmdList);
     bakedLightMap.MakeReadableUAV(cmdList);
@@ -2194,8 +2242,48 @@ void DXRPathTracer::BuildRTAccelerationStructure()
     lastBuildAccelStructureFrame = DX12::CurrentCPUFrame;
 }
 
+void EnableDebugLayerAndGBV()
+{
+    // --- 仅在Debug模式下启用 ---
+#if defined(_DEBUG)
+    ComPtr<ID3D12Debug> debugController;
+    if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
+    {
+        // 1. 启用基础调试层
+        // 这个会进行API参数验证，状态跟踪等
+        debugController->EnableDebugLayer();
+        OutputDebugStringA("D3D12 Debug Layer Enabled.\n");
+
+        // 2. 尝试获取更高版本的调试接口以启用GPU-Based Validation
+        ComPtr<ID3D12Debug1> debugController1;
+        if (SUCCEEDED(debugController->QueryInterface(IID_PPV_ARGS(&debugController1))))
+        {
+            // 启用 GPU-Based Validation (GBV)
+            // GBV会注入代码到你的Shader中，用来检查例如：
+            // - 访问未初始化的变量
+            // - 资源状态不匹配
+            // - 访问越界的缓冲区
+            // 这对于定位你的TraceRay问题至关重要！
+            debugController1->SetEnableGPUBasedValidation(TRUE);
+            OutputDebugStringA("GPU-Based Validation (GBV) Enabled.\n");
+
+            // (可选) 启用保守的资源状态跟踪
+            // debugController1->SetEnableConservativeResourceStateTracking(TRUE);
+        }
+    }
+    else
+    {
+        OutputDebugStringA("Warning: Unable to enable D3D12 Debug Layer. Please install the Graphics Tools for Windows.\n");
+    }
+#endif
+}
+
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow)
 {
+    //EnableDebugLayerAndGBV(); 
+
     DXRPathTracer app(lpCmdLine);
     app.Run();
+
+    return 0;
 }
