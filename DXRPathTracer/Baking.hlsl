@@ -40,9 +40,9 @@ struct RayTraceConstants
 // 在 Baking.hlsl 顶部
 struct BakingConstants
 {
+    uint SampleIndex; 
     uint SurfaceMapPositionIdx;
     uint SurfaceMapNormalIdx;
-    uint Padding0;
     uint Padding1;
 };
 
@@ -89,7 +89,7 @@ struct ShadowPayload
 enum RayTypes {
     RayTypeRadiance = 0,
     RayTypeShadow = 1,
-    NumRayTypes
+    NumRayTypes = 2
 };
 
 // ------------------------------------------------------------------------------------------------
@@ -100,8 +100,7 @@ static float2 SamplePoint(in uint pixelIdx, inout uint setIdx)
 {
     const uint permutation = setIdx * RayTraceCB.TotalNumPixels + pixelIdx;
     setIdx += 1;
-    // 使用 RayTraceCB.CurrSampleIdx 而不是 BakingCB.SampleIndex
-    return SampleCMJ2D(RayTraceCB.CurrSampleIdx, AppSettings.SqrtNumSamples, AppSettings.SqrtNumSamples, permutation);
+    return SampleCMJ2D(BakingCB.SampleIndex, AppSettings.SqrtNumSamples, AppSettings.SqrtNumSamples, permutation);
 }
 
 float3 PathTrace(in MeshVertex hitSurface, in Material material, in PrimaryPayload inPayload);
@@ -112,7 +111,7 @@ Material GetGeometryMaterial(in uint geometryIdx);
 void ClosestHitShader(inout PrimaryPayload payload, in HitAttributes attr)
 {
     const MeshVertex hitSurface = GetHitSurface(attr, GeometryIndex());
-    const Material material = GetGeometryMaterial(GeometryIndex());
+    const Material material = GetGeometryMaterial(GeometryIndex()); 
     payload.Radiance = PathTrace(hitSurface, material, payload);
 }
 
@@ -140,7 +139,6 @@ void ShadowAnyHitShader(inout ShadowPayload payload, in HitAttributes attr)
 void MissShader(inout PrimaryPayload payload)
 {
     payload.Radiance = 1.0;
-    /*
     if(AppSettings.EnableWhiteFurnaceMode)
     {
         payload.Radiance = 1.0.xxx;
@@ -150,7 +148,14 @@ void MissShader(inout PrimaryPayload payload)
         const float3 rayDir = WorldRayDirection();
         TextureCube skyTexture = TexCubeTable[RayTraceCB.SkyTextureIdx];
         payload.Radiance = AppSettings.EnableSky ? skyTexture.SampleLevel(LinearSampler, rayDir, 0.0f).xyz : float3(0.0f, 0.0f, 0.0f);
-    }*/
+
+        if(payload.PathLength == 1)
+        {
+            float cosSunAngle = dot(rayDir, RayTraceCB.SunDirectionWS);
+            if(cosSunAngle >= RayTraceCB.CosSunAngularRadius)
+                payload.Radiance = RayTraceCB.SunRenderColor;
+        }
+    }
 }
 
 [shader("closesthit")]
@@ -165,9 +170,6 @@ void ShadowMissShader(inout ShadowPayload payload)
     payload.Visibility = 1.0f;
 }
 
-// (此处省略了PathTrace, GetHitSurface, GetGeometryMaterial的完整代码，因为它们和RayTrace.hlsl完全一样)
-// (请将RayTrace.hlsl中这些函数的完整代码复制到这里)
-// --- 为了完整性，我将它们也粘贴在下面 ---
 MeshVertex GetHitSurface(in HitAttributes attr, in uint geometryIdx)
 {
     float3 barycentrics = float3(1 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
@@ -418,12 +420,12 @@ void BakeRayGen()
 
     if (bIsOriginBad|| bIsDirectionBad)
     {
-        g_BakedLightMap[pixelCoord] = float4(0.0, 0.0, 1.0, 1.0); // 蓝色代表无穷大
+        g_BakedLightMap[pixelCoord] = float4(1.0, 0.0, 1.0, 1.0); // 蓝色代表无穷大
         return;
     }
 
     TraceRay(Scene, traceRayFlags, 0xFFFFFFFF, hitGroupOffset, hitGroupGeoMultiplier, missShaderIdx, ray, payload);
-
+        
     // 累加结果
     float3 newSampleColor = payload.Radiance;
     
@@ -435,7 +437,7 @@ void BakeRayGen()
     g_AccumulationBuffer[pixelCoord] = float4(newSum, 1.0f);
 
     // 计算平均值并写入最终的光照贴图，供UI预览
-    // 使用 RayTraceCB.CurrSampleIdx
-    float3 averageColor = newSum / (RayTraceCB.CurrSampleIdx + 1.0f);
+    float3 averageColor = newSum / (BakingCB.SampleIndex + 1.0f);
     g_BakedLightMap[pixelCoord] = float4(averageColor, 1.0f);
+
 }

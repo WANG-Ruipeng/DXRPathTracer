@@ -60,17 +60,20 @@ void ShaderDebugInfoCallback(const void* pShaderDebugInfo, const uint32_t shader
 // Model filenames
 static const wchar* ScenePaths[] =
 {
-    L"..\\Content\\Models\\Sponza\\Sponza.fbx",
+    //L"..\\Content\\Models\\Sponza\\Sponza.fbx",
+    L"..\\Content\\Models\\Sponza\\Sponza_NoSpotLight.fbx",
     L"..\\Content\\Models\\SunTemple\\SunTemple.fbx",
     nullptr,
     L"..\\Content\\Models\\WhiteFurnace\\WhiteFurnace.fbx",
+    L"..\\Content\\Models\\theInn\\source\\theInn.fbx",
+    //L"..\\Content\\Models\\cathedral\\source\\combined02.obj",
 };
 
-static const wchar* SceneTextureDirs[] = { nullptr, L"Textures", nullptr, nullptr };
-static const float SceneScales[] = { 0.01f, 0.005f, 1.0f, 1.0f };
-static const Float3 SceneCameraPositions[] = { Float3(-11.5f, 1.85f, -0.45f), Float3(-1.0f, 5.5f, 12.0f), Float3(0.0f, 2.5f, -10.0f), Float3(0.0f, 0.0f, -3.0f) };
-static const Float2 SceneCameraRotations[] = { Float2(0.0f, 1.544f), Float2(0.2f, 3.0f), Float2(0.0f, 0.0f), Float2(0.0f, 0.0f) };
-static const Float3 SceneSunDirections[] = { Float3(0.26f, 0.987f, -0.16f), Float3(-0.133022308f, 0.642787635f, 0.75440651f), Float3(0.26f, 0.987f, -0.16f), Float3(0.0f, 1.0f, 0.0f) };
+static const wchar* SceneTextureDirs[] = { nullptr, L"Textures", nullptr, nullptr, L"..\\textures" };
+static const float SceneScales[] = { 0.01f, 0.005f, 1.0f, 1.0f, 0.1f };
+static const Float3 SceneCameraPositions[] = { Float3(-11.5f, 1.85f, -0.45f), Float3(-1.0f, 5.5f, 12.0f), Float3(0.0f, 2.5f, -10.0f), Float3(0.0f, 0.0f, -3.0f) , Float3(0.0f, 0.0f, -30.0f) };
+static const Float2 SceneCameraRotations[] = { Float2(0.0f, 1.544f), Float2(0.2f, 3.0f), Float2(0.0f, 0.0f), Float2(0.0f, 0.0f) , Float2(0.0f, 0.0f)};
+static const Float3 SceneSunDirections[] = { Float3(0.26f, 0.987f, -0.16f), Float3(-0.133022308f, 0.642787635f, 0.75440651f), Float3(0.26f, 0.987f, -0.16f), Float3(0.0f, 1.0f, 0.0f) , Float3(-0.218f, 0.5f, -0.839f) };
 
 StaticAssert_(ArraySize_(ScenePaths) == uint64(Scenes::NumValues));
 StaticAssert_(ArraySize_(SceneTextureDirs) == uint64(Scenes::NumValues));
@@ -83,7 +86,7 @@ static const uint64 NumConeSides = 16;
 
 static const bool Benchmark = false;
 
-static const uint32 LightMapResolution = 16;
+static const uint32 LightMapResolution = 4096;
 
 struct HitGroupRecord
 {
@@ -487,6 +490,8 @@ void DXRPathTracer::Shutdown()
     rtGeoInfoBuffer.Shutdown();
 
     bakingRayGenTable.Shutdown();
+    bakingHitTable.Shutdown();
+    bakingMissTable.Shutdown();
     surfaceMap.Shutdown();
     surfaceMapNormal.Shutdown(); 
     accumulationBuffer.Shutdown();
@@ -495,10 +500,6 @@ void DXRPathTracer::Shutdown()
     bakedLightMap.Shutdown();
     uvLayoutMap.Shutdown();
     DX12::Release(uvVisRS);
-
-    // --- 新增代码：在程序退出时禁用 Aftermath ---
-    // GFSDK_Aftermath_DisableGpuCrashDumps();
-    // --- 新增代码结束 ---
 }
 
 void DXRPathTracer::VisualizeUVs(Model* model)
@@ -1161,19 +1162,22 @@ void DXRPathTracer::CreateRayTracingPSOs()
     bakingPSO = bakingBuilder.CreateStateObject(D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE);
     bakingPSO->SetName(L"Baking PSO");
 
-    // 2. 从新的 Baking PSO 中获取着色器标识符
     ID3D12StateObjectProperties* bakingPsoProps = nullptr;
     bakingPSO->QueryInterface(IID_PPV_ARGS(&bakingPsoProps));
-    
-    // 我们只需要新的 RayGen 着色器的ID，因为 Hit/Miss Table 将被复用
+
     const void* bakeRayGenID = bakingPsoProps->GetShaderIdentifier(L"BakeRayGen");
-    
+    const void* bakingHitGroupID = bakingPsoProps->GetShaderIdentifier(L"HitGroup");
+    const void* bakingAlphaTestHitGroupID = bakingPsoProps->GetShaderIdentifier(L"AlphaTestHitGroup");
+    const void* bakingShadowHitGroupID = bakingPsoProps->GetShaderIdentifier(L"ShadowHitGroup");
+    const void* bakingShadowAlphaTestHitGroupID = bakingPsoProps->GetShaderIdentifier(L"ShadowAlphaTestHitGroup");
+    const void* bakingMissID = bakingPsoProps->GetShaderIdentifier(L"MissShader");
+    const void* bakingShadowMissID = bakingPsoProps->GetShaderIdentifier(L"ShadowMissShader");
+
     DX12::Release(bakingPsoProps);
 
     // 3. 创建烘焙专用的光线生成着色器表 (RayGen Shader Table)
     {
         ShaderIdentifier bakeRayGenRecords[1] = { ShaderIdentifier(bakeRayGenID) };
-
         StructuredBufferInit sbInit;
         sbInit.Stride = sizeof(ShaderIdentifier);
         sbInit.NumElements = ArraySize_(bakeRayGenRecords);
@@ -1183,7 +1187,42 @@ void DXRPathTracer::CreateRayTracingPSOs()
         bakingRayGenTable.Initialize(sbInit);
     }
 
-    // --- 新增代码 结束 ---
+    // 4. 创建烘焙专用的未命中着色器表 (Miss Shader Table)
+    {
+        ShaderIdentifier missRecords[2] = { ShaderIdentifier(bakingMissID), ShaderIdentifier(bakingShadowMissID) };
+        StructuredBufferInit sbInit;
+        sbInit.Stride = sizeof(ShaderIdentifier);
+        sbInit.NumElements = ArraySize_(missRecords);
+        sbInit.InitData = missRecords;
+        sbInit.ShaderTable = true;
+        sbInit.Name = L"Baking Miss Shader Table";
+        bakingMissTable.Initialize(sbInit); // <-- 使用我们新声明的 bakingMissTable
+    }
+
+    // 5. 创建烘焙专用的命中组表 (Hit Group Table)
+    {
+        const uint32 numMeshes = uint32(currentModel->NumMeshes());
+        Array<HitGroupRecord> hitGroupRecords(numMeshes * 2);
+        for (uint64 i = 0; i < numMeshes; ++i)
+        {
+            const Mesh& mesh = currentModel->Meshes()[i];
+            Assert_(mesh.NumMeshParts() == 1);
+            const uint32 materialIdx = mesh.MeshParts()[0].MaterialIdx;
+            const MeshMaterial& material = currentModel->Materials()[materialIdx];
+            const bool alphaTest = material.Textures[uint32(MaterialTextures::Opacity)] != nullptr;
+            
+            hitGroupRecords[i * 2 + 0].ID = alphaTest ? ShaderIdentifier(bakingAlphaTestHitGroupID) : ShaderIdentifier(bakingHitGroupID);
+            hitGroupRecords[i * 2 + 1].ID = alphaTest ? ShaderIdentifier(bakingShadowAlphaTestHitGroupID) : ShaderIdentifier(bakingShadowHitGroupID);
+        }
+
+        StructuredBufferInit sbInit;
+        sbInit.Stride = sizeof(HitGroupRecord);
+        sbInit.NumElements = hitGroupRecords.Size();
+        sbInit.InitData = hitGroupRecords.Data();
+        sbInit.ShaderTable = true;
+        sbInit.Name = L"Baking Hit Shader Table";
+        bakingHitTable.Initialize(sbInit); // <-- 使用我们新声明的 bakingHitTable
+    }
     
 }
 
@@ -1802,8 +1841,8 @@ void DXRPathTracer::RenderBakingPass_Progressive()
     // 6. 配置并分发光线
     D3D12_DISPATCH_RAYS_DESC dispatchDesc = {};
     dispatchDesc.RayGenerationShaderRecord = bakingRayGenTable.ShaderRecord(0);
-    dispatchDesc.MissShaderTable = rtMissTable.ShaderTable();
-    dispatchDesc.HitGroupTable = rtHitTable.ShaderTable();
+    dispatchDesc.MissShaderTable = bakingMissTable.ShaderTable();
+    dispatchDesc.HitGroupTable = bakingHitTable.ShaderTable();
     dispatchDesc.Width = LightMapResolution;
     dispatchDesc.Height = LightMapResolution;
     dispatchDesc.Depth = 1;
@@ -2244,7 +2283,6 @@ void DXRPathTracer::BuildRTAccelerationStructure()
 
 void EnableDebugLayerAndGBV()
 {
-    // --- 仅在Debug模式下启用 ---
 #if defined(_DEBUG)
     ComPtr<ID3D12Debug> debugController;
     if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
@@ -2258,17 +2296,8 @@ void EnableDebugLayerAndGBV()
         ComPtr<ID3D12Debug1> debugController1;
         if (SUCCEEDED(debugController->QueryInterface(IID_PPV_ARGS(&debugController1))))
         {
-            // 启用 GPU-Based Validation (GBV)
-            // GBV会注入代码到你的Shader中，用来检查例如：
-            // - 访问未初始化的变量
-            // - 资源状态不匹配
-            // - 访问越界的缓冲区
-            // 这对于定位你的TraceRay问题至关重要！
             debugController1->SetEnableGPUBasedValidation(TRUE);
             OutputDebugStringA("GPU-Based Validation (GBV) Enabled.\n");
-
-            // (可选) 启用保守的资源状态跟踪
-            // debugController1->SetEnableConservativeResourceStateTracking(TRUE);
         }
     }
     else

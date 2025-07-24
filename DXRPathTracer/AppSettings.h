@@ -23,7 +23,8 @@ enum class Scenes
     SunTemple = 1,
     BoxTest = 2,
     WhiteFurnace = 3,
-
+    Stronghold = 4,
+    
     NumValues
 };
 

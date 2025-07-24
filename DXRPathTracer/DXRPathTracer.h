@@ -100,6 +100,8 @@ protected:
     CompiledShaderPtr bakingLib;
     ID3D12StateObject* bakingPSO = nullptr;
     StructuredBuffer bakingRayGenTable;
+    StructuredBuffer bakingHitTable;
+    StructuredBuffer bakingMissTable;
 
     bool showLightmapWindow = true;
     //bool bakeRequested = false;
