@@ -44,6 +44,7 @@ namespace AppSettings
     IntSetting MaxLightClamp;
     ClusterRasterizationModesSetting ClusterRasterizationMode;
     BoolSetting EnableRayTracing;
+    BoolSetting EnableLightMapRender;
     BoolSetting ClampRoughness;
     BoolSetting AvoidCausticPaths;
     IntSetting SqrtNumSamples;
@@ -129,6 +130,9 @@ namespace AppSettings
 
         EnableRayTracing.Initialize("EnableRayTracing", "Path Tracing", "Enable Ray Tracing", "", true);
         Settings.AddSetting(&EnableRayTracing);
+
+        EnableLightMapRender.Initialize("EnableLightMapRender", "Path Tracing", "Enable LightMap Render", "", true);
+        Settings.AddSetting(&EnableLightMapRender);
 
         ClampRoughness.Initialize("ClampRoughness", "Path Tracing", "Clamp Roughness", "Clamp roughness for caustic paths from glossy bounces. Based on 'Physically Based Shader Design in Arnold' [Langlands14]", false);
         Settings.AddSetting(&ClampRoughness);
@@ -247,6 +251,7 @@ namespace AppSettings
         cbData.RoughnessScale = RoughnessScale;
         cbData.MetallicScale = MetallicScale;
         cbData.EnableWhiteFurnaceMode = EnableWhiteFurnaceMode;
+        cbData.EnableLightMapRender = EnableLightMapRender;
 
         CBuffer.MapAndSetData(cbData);
     }

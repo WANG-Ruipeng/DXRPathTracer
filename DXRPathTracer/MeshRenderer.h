@@ -35,6 +35,7 @@ struct MainPassData
     const SkyCache* SkyCache = nullptr;
     const ConstantBuffer* SpotLightBuffer = nullptr;
     const RawBuffer* SpotLightClusterBuffer = nullptr;
+    const RenderTexture* BakedLightMap = nullptr;
 };
 
 struct ShadingConstants

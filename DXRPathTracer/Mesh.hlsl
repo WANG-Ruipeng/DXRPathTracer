@@ -14,6 +14,7 @@
 // Includes
 //=================================================================================================
 #include "Shading.hlsl"
+#include "AppSettings.hlsl"
 
 //=================================================================================================
 // Constant buffers
@@ -38,6 +39,7 @@ struct SRVIndexConstants
     uint SpotLightShadowMapIdx;
     uint MaterialTextureIndicesIdx;
     uint SpotLightClusterBufferIdx;
+    uint LightMapIdx;
 };
 
 ConstantBuffer<VSConstants> VSCBuffer : register(b0);
@@ -64,6 +66,7 @@ struct VSInput
     float2 UV                   : UV;
     float3 TangentOS            : TANGENT;
     float3 BitangentOS          : BITANGENT;
+    float2 LightmapUV           : TEXCOORD1;
 };
 
 struct VSOutput
@@ -76,6 +79,7 @@ struct VSOutput
     float3 TangentWS            : TANGENTWS;
     float3 BitangentWS          : BITANGENTWS;
     float2 UV                   : UV;
+    float2 LightmapUV           : TEXCOORD1;
 };
 
 struct PSInput
@@ -88,6 +92,7 @@ struct PSInput
     float3 TangentWS            : TANGENTWS;
     float3 BitangentWS          : BITANGENTWS;
     float2 UV                   : UV;
+    float2 LightmapUV           : TEXCOORD1;
 };
 
 struct PSOutputForward
@@ -121,6 +126,7 @@ VSOutput VS(in VSInput input, in uint VertexID : SV_VertexID)
 
     // Pass along the texture coordinates
     output.UV = input.UV;
+    output.LightmapUV = input.LightmapUV;
 
     return output;
 }
@@ -130,46 +136,12 @@ VSOutput VS(in VSInput input, in uint VertexID : SV_VertexID)
 //=================================================================================================
 float4 PSForward(in PSInput input) : SV_Target0
 {
-    float3 vtxNormalWS = normalize(input.NormalWS);
-    float3 positionWS = input.PositionWS;
-
-    float3 tangentWS = normalize(input.TangentWS);
-    float3 bitangentWS = normalize(input.BitangentWS);
-    float3x3 tangentFrame = float3x3(tangentWS, bitangentWS, vtxNormalWS);
+    // --- 1. 公共部分：获取材质和执行Alpha测试 ---
+    // 这部分代码无论使用哪种渲染路径都是必需的，所以我们把它放在最前面。
 
     StructuredBuffer<Material> materialBuffer = ResourceDescriptorHeap[SRVIndices.MaterialTextureIndicesIdx];
     Material material = materialBuffer[MatIndexCBuffer.MatIndex];
     Texture2D AlbedoMap = ResourceDescriptorHeap[material.Albedo];
-    Texture2D NormalMap = ResourceDescriptorHeap[material.Normal];
-    Texture2D RoughnessMap = ResourceDescriptorHeap[material.Roughness];
-    Texture2D MetallicMap = ResourceDescriptorHeap[material.Metallic];
-    Texture2D EmissiveMap = ResourceDescriptorHeap[material.Emissive];
-
-    ShadingInput shadingInput;
-    shadingInput.PositionSS = uint2(input.PositionSS.xy);
-    shadingInput.PositionWS = input.PositionWS;
-    shadingInput.PositionWS_DX = ddx_fine(input.PositionWS);
-    shadingInput.PositionWS_DY = ddy_fine(input.PositionWS);
-    shadingInput.DepthVS = input.DepthVS;
-    shadingInput.TangentFrame = tangentFrame;
-
-    shadingInput.AlbedoMap = AlbedoMap.Sample(AnisoSampler, input.UV);
-    shadingInput.NormalMap = NormalMap.Sample(AnisoSampler, input.UV).xy;
-    shadingInput.RoughnessMap = RoughnessMap.Sample(AnisoSampler, input.UV).x;
-    shadingInput.MetallicMap = MetallicMap.Sample(AnisoSampler, input.UV).x;
-    shadingInput.EmissiveMap = EmissiveMap.Sample(AnisoSampler, input.UV).xyz;
-
-    shadingInput.SpotLightClusterBuffer = RawBufferTable[SRVIndices.SpotLightClusterBufferIdx];
-
-    shadingInput.AnisoSampler = AnisoSampler;
-    shadingInput.LinearSampler = LinearSampler;
-
-    shadingInput.ShadingCBuffer = PSCBuffer;
-    shadingInput.ShadowCBuffer = ShadowCBuffer;
-    shadingInput.LightCBuffer = LightCBuffer;
-
-    Texture2DArray sunShadowMap = Tex2DArrayTable[SRVIndices.SunShadowMapIdx];
-    Texture2DArray spotLightShadowMap = Tex2DArrayTable[SRVIndices.SpotLightShadowMapIdx];
 
     #if AlphaTest_
         Texture2D OpacityMap = ResourceDescriptorHeap[material.Opacity];
@@ -177,7 +149,58 @@ float4 PSForward(in PSInput input) : SV_Target0
             discard;
     #endif
 
-    float3 shadingResult = ShadePixel(shadingInput, sunShadowMap, spotLightShadowMap, PCFSampler);
 
-    return float4(shadingResult, 1.0f);
+    // --- 2. 使用 AppSettings 开关选择渲染路径 ---
+
+    if (AppSettings.EnableLightMapRender)
+    {
+        float4 albedoColor = AlbedoMap.Sample(AnisoSampler, input.UV);
+        Texture2D lightMap = ResourceDescriptorHeap[NonUniformResourceIndex(SRVIndices.LightMapIdx)];
+        float3 bakedLighting = lightMap.Sample(LinearSampler, input.LightmapUV).rgb;
+        float3 finalColor = albedoColor.rgb * bakedLighting;
+        return float4(finalColor, albedoColor.a);
+    }
+    else
+    {
+        // === 原始的动态光照路径 (您的旧代码) ===
+        // 如果开关为 false，我们就执行原来的、复杂的动态光照计算。
+
+        float3 vtxNormalWS = normalize(input.NormalWS);
+        float3 positionWS = input.PositionWS;
+
+        float3 tangentWS = normalize(input.TangentWS);
+        float3 bitangentWS = normalize(input.BitangentWS);
+        float3x3 tangentFrame = float3x3(tangentWS, bitangentWS, vtxNormalWS);
+
+        Texture2D NormalMap = ResourceDescriptorHeap[material.Normal];
+        Texture2D RoughnessMap = ResourceDescriptorHeap[material.Roughness];
+        Texture2D MetallicMap = ResourceDescriptorHeap[material.Metallic];
+        Texture2D EmissiveMap = ResourceDescriptorHeap[material.Emissive];
+
+        ShadingInput shadingInput;
+        shadingInput.PositionSS = uint2(input.PositionSS.xy);
+        shadingInput.PositionWS = input.PositionWS;
+        shadingInput.PositionWS_DX = ddx_fine(input.PositionWS);
+        shadingInput.PositionWS_DY = ddy_fine(input.PositionWS);
+        shadingInput.DepthVS = input.DepthVS;
+        shadingInput.TangentFrame = tangentFrame;
+        shadingInput.AlbedoMap = AlbedoMap.Sample(AnisoSampler, input.UV);
+        shadingInput.NormalMap = NormalMap.Sample(AnisoSampler, input.UV).xy;
+        shadingInput.RoughnessMap = RoughnessMap.Sample(AnisoSampler, input.UV).x;
+        shadingInput.MetallicMap = MetallicMap.Sample(AnisoSampler, input.UV).x;
+        shadingInput.EmissiveMap = EmissiveMap.Sample(AnisoSampler, input.UV).xyz;
+        shadingInput.SpotLightClusterBuffer = RawBufferTable[SRVIndices.SpotLightClusterBufferIdx];
+        shadingInput.AnisoSampler = AnisoSampler;
+        shadingInput.LinearSampler = LinearSampler;
+        shadingInput.ShadingCBuffer = PSCBuffer;
+        shadingInput.ShadowCBuffer = ShadowCBuffer;
+        shadingInput.LightCBuffer = LightCBuffer;
+
+        Texture2DArray sunShadowMap = Tex2DArrayTable[SRVIndices.SunShadowMapIdx];
+        Texture2DArray spotLightShadowMap = Tex2DArrayTable[SRVIndices.SpotLightShadowMapIdx];
+
+        float3 shadingResult = ShadePixel(shadingInput, sunShadowMap, spotLightShadowMap, PCFSampler);
+
+        return float4(shadingResult, 1.0f);
+    }
 }

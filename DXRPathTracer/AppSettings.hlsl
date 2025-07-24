@@ -1,3 +1,4 @@
+#pragma once
 struct AppSettings_Layout
 {
     bool EnableSun;
@@ -28,6 +29,7 @@ struct AppSettings_Layout
     float RoughnessScale;
     float MetallicScale;
     bool EnableWhiteFurnaceMode;
+    bool EnableLightMapRender;
 };
 
 ConstantBuffer<AppSettings_Layout> AppSettings : register(b12);

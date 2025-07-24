@@ -411,19 +411,42 @@ void MeshRenderer::RenderMainPass(ID3D12GraphicsCommandList* cmdList, const Came
 
     AppSettings::BindCBufferGfx(cmdList, MainPass_AppSettings);
 
+    uint32 lightmapSRV = 0;
+    // 确保 mainPassData.BakedLightMap 有效，并获取其SRV索引
+    if (mainPassData.BakedLightMap != nullptr && mainPassData.BakedLightMap->SRV() != 0)
+    {
+        lightmapSRV = mainPassData.BakedLightMap->SRV();
+    }
+
     uint32 psSRVs[] =
     {
         sunDepthMap.SRV(),
         spotLightDepthMap.SRV(),
         materialBuffer.SRV,
         mainPassData.SpotLightClusterBuffer->SRV,
+        lightmapSRV, // <--- 新增：第五个元素是光照贴图的 SRV 索引
     };
 
     DX12::BindTempConstantBuffer(cmdList, psSRVs, MainPass_SRVIndices, CmdListMode::Graphics);
 
     // Bind vertices and indices
-    D3D12_VERTEX_BUFFER_VIEW vbView = model->VertexBuffer().VBView();
-    D3D12_INDEX_BUFFER_VIEW ibView = model->IndexBuffer().IBView();
+    D3D12_VERTEX_BUFFER_VIEW vbView;
+    D3D12_INDEX_BUFFER_VIEW ibView;
+
+    // 检查是否存在由 xatlas 生成的光照贴图专用几何体
+    if (model->GetLightmappedVertexCount() > 0)
+    {
+        // 如果存在，就使用这些包含正确 LightmapUV 的新缓冲区
+        vbView = model->GetLightmappedVertexBuffer().VBView();
+        ibView = model->GetLightmappedIndexBuffer().IBView();
+    }
+    else
+    {
+        // 如果不存在（例如，对于一些没有经过 xatlas 处理的简单模型），则回退到原始缓冲区
+        vbView = model->VertexBuffer().VBView();
+        ibView = model->IndexBuffer().IBView();
+    }
+
     cmdList->IASetVertexBuffers(0, 1, &vbView);
     cmdList->IASetIndexBuffer(&ibView);
 

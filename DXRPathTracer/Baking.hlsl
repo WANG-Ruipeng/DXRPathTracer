@@ -338,10 +338,6 @@ void BakeRayGen()
 {
     // 获取当前线程处理的像素坐标，这对应光照贴图中的一个texel
     const uint2 pixelCoord = DispatchRaysIndex().xy;
-    /*
-    g_BakedLightMap[pixelCoord] = float4(1.0, 0.0, 0.0, 1.0);
-    g_AccumulationBuffer[pixelCoord] = float4(0, 0, 0, 0);
-    return;*/
 
     const uint pixelIdx = pixelCoord.y * DispatchRaysDimensions().x + pixelCoord.x;
     
@@ -393,7 +389,7 @@ void BakeRayGen()
 
     // 准备光线和Payload
     RayDesc ray;
-    ray.Origin = worldPos + worldNormal * 0.001f; // 将起点沿法线方向稍微偏移，避免自相交
+    ray.Origin = worldPos + rayDir * 0.00001f; // 避免光线起始点在表面上
     ray.Direction = rayDir;
     ray.TMin = 0.0001f;
     ray.TMax = FP32Max;
@@ -425,19 +421,27 @@ void BakeRayGen()
     }
 
     TraceRay(Scene, traceRayFlags, 0xFFFFFFFF, hitGroupOffset, hitGroupGeoMultiplier, missShaderIdx, ray, payload);
-        
-    // 累加结果
+
     float3 newSampleColor = payload.Radiance;
+    const float minLuminance = 0.0001f;
+    bool isNan = any(isnan(newSampleColor));
+    float luminance = dot(newSampleColor, float3(0.299, 0.587, 0.114));
+    bool isTooDark = luminance < minLuminance;
+    bool isValidSample = !isNan && !isTooDark;
     
-    // 读取上一帧的累加值
-    float3 oldSum = g_AccumulationBuffer[pixelCoord].xyz;
-    
-    // 计算新的累加值并写回
-    float3 newSum = oldSum + newSampleColor;
-    g_AccumulationBuffer[pixelCoord] = float4(newSum, 1.0f);
-
-    // 计算平均值并写入最终的光照贴图，供UI预览
-    float3 averageColor = newSum / (BakingCB.SampleIndex + 1.0f);
+    float4 previousAccumulation = g_AccumulationBuffer[pixelCoord];
+    float3 colorSum = previousAccumulation.xyz;
+    float validSampleCount = previousAccumulation.w;
+    if (isValidSample)
+    {
+        colorSum += newSampleColor;
+        validSampleCount += 1.0f;
+    }
+    g_AccumulationBuffer[pixelCoord] = float4(colorSum, validSampleCount);
+    float3 averageColor = float3(0.0f, 0.0f, 0.0f);
+    if (validSampleCount > 0.0f)
+    {
+        averageColor = colorSum / validSampleCount;
+    }
     g_BakedLightMap[pixelCoord] = float4(averageColor, 1.0f);
-
 }

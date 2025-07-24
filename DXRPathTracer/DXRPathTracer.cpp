@@ -1651,6 +1651,7 @@ void DXRPathTracer::RenderForward()
         mainPassData.SkyCache = &skyCache;
         mainPassData.SpotLightBuffer = &spotLightBuffer;
         mainPassData.SpotLightClusterBuffer = &spotLightClusterBuffer;
+        mainPassData.BakedLightMap = &bakedLightMap;
         meshRenderer.RenderMainPass(cmdList, camera, mainPassData);
 
         cmdList->OMSetRenderTargets(1, rtvHandles, false, &depthBuffer.DSV);
