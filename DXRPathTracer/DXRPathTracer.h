@@ -24,6 +24,7 @@
 
 #include "PostProcessor.h"
 #include "MeshRenderer.h"
+#include "OidnDenoiser.h"
 
 using namespace SampleFramework12;
 
@@ -82,12 +83,22 @@ protected:
 
     RenderTexture surfaceMap;
     RenderTexture surfaceMapNormal;
+    RenderTexture surfaceMapAlbedo;
     RenderTexture accumulationBuffer;
 
     // 烘焙管线状态
     bool isBaking = false;
     uint32 bakingSampleIndex = 0;
-    enum class TextureToPreview { UVLayout, SurfaceMap, Accumulation, FinalLightmap };
+    enum class TextureToPreview
+    {
+        UVLayout,
+        SurfaceMap,
+        SurfaceMapNormal,
+        SurfaceMapAlbedo,
+        Accumulation,
+        FinalLightmap,
+        DenoisedLightmap 
+    };
     TextureToPreview textureToPreview = TextureToPreview::FinalLightmap;
 
     // 用于生成 SurfaceMap 的资源
@@ -132,6 +143,10 @@ protected:
     bool rtShouldRestartPathTrace = false;
     uint32 rtCurrSampleIdx = 0;
 
+    OidnDenoiser oidnDenoiser;
+    RenderTexture denoisedLightMap;
+    bool denoisingRequested = false;
+
     virtual void Initialize() override;
     virtual void Shutdown() override;
 
@@ -163,6 +178,8 @@ protected:
     void RenderBakingPass();
     void RenderSurfaceMap();
     void RenderBakingPass_Progressive();
+
+    void DenoiseLightmap();
 
     D3D12_CPU_DESCRIPTOR_HANDLE g_NullUAV;
 

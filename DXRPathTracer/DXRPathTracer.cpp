@@ -230,24 +230,6 @@ void DXRPathTracer::Initialize()
         AppSettings::CurrentScene.SetValue(Scenes::SunTemple);
     }
 
-    /*
-    const uint32_t aftermathFlags =
-        GFSDK_Aftermath_FeatureFlags_EnableMarkers |
-        GFSDK_Aftermath_FeatureFlags_EnableResourceTracking |
-        GFSDK_Aftermath_FeatureFlags_GenerateShaderDebugInfo;
-
-    const GFSDK_Aftermath_Result result = GFSDK_Aftermath_DX12_Initialize(
-        GFSDK_Aftermath_Version_API,
-        aftermathFlags,
-        DX12::Device); // 此时 DX12::Device 肯定已经创建好了
-
-    if (result != GFSDK_Aftermath_Result_Success)
-    {
-        std::wcerr << L"Failed to initialize Aftermath" << std::endl;
-        exit(EXIT_FAILURE);
-    }
-    */
-
     // Check if the device supports conservative rasterization
     D3D12_FEATURE_DATA_D3D12_OPTIONS features = { };
     DX12::Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &features, sizeof(features));
@@ -293,11 +275,27 @@ void DXRPathTracer::Initialize()
         // 编译 Baking DXR 库
         bakingLib = CompileFromFile(L"Baking.hlsl", nullptr, ShaderType::Library);
 
-        // 创建 SurfaceMap 的根签名 (空白即可)
+            // 创建 SurfaceMap 的根签名
+        D3D12_ROOT_PARAMETER1 rootParameters[1] = {};
+
+        // 参数0: 绑定全局的 SRV 描述符表 (包含所有Buffer和Texture)
+        rootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL; // 仅像素着色器需要
+        rootParameters[0].DescriptorTable.pDescriptorRanges = DX12::GlobalSRVDescriptorRanges();
+        rootParameters[0].DescriptorTable.NumDescriptorRanges = DX12::NumGlobalSRVDescriptorRanges;
+
+        // 静态采样器 (Sampler)
+        D3D12_STATIC_SAMPLER_DESC staticSamplers[1] = {};
+        staticSamplers[0] = DX12::GetStaticSamplerState(SamplerState::LinearClamp, 1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+
         D3D12_ROOT_SIGNATURE_DESC1 surfaceMapRSDesc = {};
-        surfaceMapRSDesc.NumParameters = 0;
-        surfaceMapRSDesc.pParameters = nullptr;
-        surfaceMapRSDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        surfaceMapRSDesc.NumParameters = ArraySize_(rootParameters);
+        surfaceMapRSDesc.pParameters = rootParameters;
+        surfaceMapRSDesc.NumStaticSamplers = ArraySize_(staticSamplers); // 添加采样器
+        surfaceMapRSDesc.pStaticSamplers = staticSamplers;
+        surfaceMapRSDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+                                D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED; // 允许直接索引
+
         DX12::CreateRootSignature(&surfaceMapRS, surfaceMapRSDesc);
         surfaceMapRS->SetName(L"Surface Map Root Signature");
     }
@@ -447,6 +445,8 @@ void DXRPathTracer::Initialize()
         DX12::CreateRootSignature(&resolveRootSignature, rootSignatureDesc);
     }
 
+    oidnDenoiser.Initialize();
+
     InitRayTracing();
     
 }
@@ -493,10 +493,13 @@ void DXRPathTracer::Shutdown()
     bakingHitTable.Shutdown();
     bakingMissTable.Shutdown();
     surfaceMap.Shutdown();
-    surfaceMapNormal.Shutdown(); 
+    surfaceMapNormal.Shutdown();
+    surfaceMapAlbedo.Shutdown();
     accumulationBuffer.Shutdown();
     DX12::Release(surfaceMapRS);  
 
+    oidnDenoiser.Shutdown();
+    denoisedLightMap.Shutdown();
     bakedLightMap.Shutdown();
     uvLayoutMap.Shutdown();
     DX12::Release(uvVisRS);
@@ -645,15 +648,17 @@ void DXRPathTracer::CreatePSOs()
     smPsoDesc.DepthStencilState = DX12::GetDepthState(DepthState::Disabled);
     smPsoDesc.SampleMask = UINT_MAX;
     smPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    smPsoDesc.NumRenderTargets = 2; // 输出到两个RT
+    smPsoDesc.NumRenderTargets = 3; // 输出到两个RT
     smPsoDesc.RTVFormats[0] = surfaceMap.Format();      // 世界坐标
-    smPsoDesc.RTVFormats[1] = surfaceMap.Format();      // 世界法线
+    smPsoDesc.RTVFormats[1] = surfaceMapNormal.Format();      // 世界法线
+    smPsoDesc.RTVFormats[2] = surfaceMapAlbedo.Format();      // 世界法线
     smPsoDesc.SampleDesc.Count = 1;
 
     D3D12_INPUT_ELEMENT_DESC smInputElements[] =
     {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(MeshVertex, Position), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(MeshVertex, Normal),   D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, offsetof(MeshVertex, UV),   D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }, 
         { "TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT,    0, offsetof(MeshVertex, LightmapUV), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
     };
     smPsoDesc.InputLayout = { smInputElements, ArraySize_(smInputElements) };
@@ -728,6 +733,10 @@ void DXRPathTracer::CreateRenderTargets()
 
         lmInit.Name = L"UV Layout Map";
        uvLayoutMap.Initialize(lmInit);
+
+        lmInit.Name = L"Denoised Light Map"; // 降噪后的光照贴图
+        lmInit.CreateUAV = false; // 不需要 UAV 访问
+        denoisedLightMap.Initialize(lmInit);
    }
 
    {
@@ -743,6 +752,8 @@ void DXRPathTracer::CreateRenderTargets()
         surfaceMap.Initialize(smInit);
         smInit.Name = L"Surface Map Normal";
         surfaceMapNormal.Initialize(smInit);
+        smInit.Name = L"Surface Map Albedo"; // <-- 新增此代码块
+        surfaceMapAlbedo.Initialize(smInit); 
 
         // 创建 Accumulation Buffer
         RenderTextureInit accumInit;
@@ -1354,6 +1365,12 @@ void DXRPathTracer::Update(const Timer& timer)
 
 void DXRPathTracer::Render(const Timer& timer)
 {
+    if (denoisingRequested)
+    {
+        DenoiseLightmap();
+        denoisingRequested = false; // 重置标志位
+    }
+
     if (isBaking)
     {
         RenderBakingPass();
@@ -1591,24 +1608,30 @@ void DXRPathTracer::RenderClusters()
         Assert_(numIntersectingSpotLights <= numLightsToRender);
         const uint64 numNonIntersecting = numLightsToRender - numIntersectingSpotLights;
 
-        // Render back faces for lights that intersect with the camera
-        cmdList->SetPipelineState(clusterIntersectingPSO);
+        // 绘制与摄像机相交的灯光 (背面)
+        if (numIntersectingSpotLights > 0)
+        {
+            cmdList->SetPipelineState(clusterIntersectingPSO);
+            cmdList->DrawIndexedInstanced(uint32(spotLightClusterIdxBuffer.NumElements), uint32(numIntersectingSpotLights), 0, 0, 0);
+        }
 
-        cmdList->DrawIndexedInstanced(uint32(spotLightClusterIdxBuffer.NumElements), uint32(numIntersectingSpotLights), 0, 0, 0);
+        // 绘制所有其他灯光 (先背面，后正面)
+        if (numNonIntersecting > 0)
+        {
+            // 设置这些灯光的偏移量
+            clusterConstants.InstanceOffset = uint32(numIntersectingSpotLights);
+            DX12::BindTempConstantBuffer(cmdList, clusterConstants, ClusterParams_CBuffer, CmdListMode::Graphics);
 
-        // Now for all other lights, render the back faces followed by the front faces
-        cmdList->SetPipelineState(clusterBackFacePSO);
+            // 绘制背面
+            cmdList->SetPipelineState(clusterBackFacePSO);
+            cmdList->DrawIndexedInstanced(uint32(spotLightClusterIdxBuffer.NumElements), uint32(numNonIntersecting), 0, 0, 0);
 
-        clusterConstants.InstanceOffset = uint32(numIntersectingSpotLights);
-        DX12::BindTempConstantBuffer(cmdList, clusterConstants, ClusterParams_CBuffer, CmdListMode::Graphics);
+            spotLightClusterBuffer.UAVBarrier(cmdList);
 
-        cmdList->DrawIndexedInstanced(uint32(spotLightClusterIdxBuffer.NumElements), uint32(numNonIntersecting), 0, 0, 0);
-
-        spotLightClusterBuffer.UAVBarrier(cmdList);
-
-        cmdList->SetPipelineState(clusterFrontFacePSO);
-
-        cmdList->DrawIndexedInstanced(uint32(spotLightClusterIdxBuffer.NumElements), uint32(numNonIntersecting), 0, 0, 0);
+            // 绘制正面
+            cmdList->SetPipelineState(clusterFrontFacePSO);
+            cmdList->DrawIndexedInstanced(uint32(spotLightClusterIdxBuffer.NumElements), uint32(numNonIntersecting), 0, 0, 0);
+        }
     }
 
     // Sync
@@ -1723,16 +1746,18 @@ void DXRPathTracer::RenderSurfaceMap()
 
     // 1. 将两个资源都切换到渲染目标状态
     surfaceMap.MakeWritable(cmdList);
-    surfaceMapNormal.MakeWritable(cmdList); // <-- 修改点
+    surfaceMapNormal.MakeWritable(cmdList);
+    surfaceMapAlbedo.MakeWritable(cmdList);
 
-    // 2. 设置渲染目标 (现在我们有两个独立的RTV了)
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandles[2] = { surfaceMap.RTV, surfaceMapNormal.RTV }; // <-- 修改点
-    cmdList->OMSetRenderTargets(2, rtvHandles, false, nullptr);
+    // 2. 设置三个渲染目标
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandles[3] = { surfaceMap.RTV, surfaceMapNormal.RTV, surfaceMapAlbedo.RTV };
+    cmdList->OMSetRenderTargets(3, rtvHandles, false, nullptr);
 
-    // 3. 分别清除两个渲染目标
+    // 3. 分别清除三个目标
     const float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     cmdList->ClearRenderTargetView(rtvHandles[0], clearColor, 0, nullptr);
-    cmdList->ClearRenderTargetView(rtvHandles[1], clearColor, 0, nullptr); // <-- 修改点
+    cmdList->ClearRenderTargetView(rtvHandles[1], clearColor, 0, nullptr);
+    cmdList->ClearRenderTargetView(rtvHandles[2], clearColor, 0, nullptr);
 
     // 4. 设置视口和渲染状态 (这部分不变)
     DX12::SetViewport(cmdList, surfaceMap.Width(), surfaceMap.Height());
@@ -1753,9 +1778,10 @@ void DXRPathTracer::RenderSurfaceMap()
         cmdList->DrawIndexedInstanced(mesh.NumIndices(), 1, mesh.IndexOffset(), mesh.VertexOffset(), 0);
     }
 
-    // 7. 将两个资源都切换回可读状态
+    // 7. 将三个资源都切换回可读状态
     surfaceMap.MakeReadable(cmdList);
-    surfaceMapNormal.MakeReadable(cmdList); // <-- 修改点
+    surfaceMapNormal.MakeReadable(cmdList);
+    surfaceMapAlbedo.MakeReadable(cmdList);
 }
 
 void DXRPathTracer::RenderBakingPass_Progressive()
@@ -2021,8 +2047,6 @@ void DXRPathTracer::RenderHUD(const Timer& timer)
 
         if (ImGui::Begin("Baked Lightmap", &showLightmapWindow))
         {
-            // === 核心修正部分 ===
-
             // 1. 获取内容区域的精确位置和大小
             ImVec2 contentPos = ImGui::GetCursorScreenPos();
             ImVec2 contentSize = ImGui::GetContentRegionAvail();
@@ -2059,6 +2083,11 @@ void DXRPathTracer::RenderHUD(const Timer& timer)
             {
                 if (ImGui::Button("Stop Baking"))
                     isBaking = false;
+                ImGui::SameLine();
+                if (ImGui::Button("使用 OIDN 降噪"))
+                {
+                    denoisingRequested = true;
+                }
             }
             else
             {
@@ -2076,25 +2105,48 @@ void DXRPathTracer::RenderHUD(const Timer& timer)
                 textureToPreview = TextureToPreview::UVLayout;
             }
 
-            const char* items[] = { "UV Layout", "Surface Map", "Accumulation Buffer", "Final Lightmap" };
-            static int currentItem = 0;
+            const char* items[] = {
+                "UV Layout",
+                "Surface Map (World Pos)",
+                "Surface Map (Normal)",
+                "Surface Map (Albedo)",
+                "Accumulation Buffer",
+                "Final Lightmap"
+            };
+            // 将枚举转换为整数，用于 ImGui::Combo
+            int currentItem = static_cast<int>(textureToPreview);
             if(ImGui::Combo("Preview", &currentItem, items, IM_ARRAYSIZE(items)))
             {
-                textureToPreview = (TextureToPreview)currentItem;
+                textureToPreview = static_cast<TextureToPreview>(currentItem);
             }
 
-            // 根据选择来决定 spriteRenderer 绘制哪个纹理
-            RenderTexture* previewTexture = &bakedLightMap;
-            if (textureToPreview == TextureToPreview::SurfaceMap)
-                previewTexture = &surfaceMap;
-            else if (textureToPreview == TextureToPreview::Accumulation)
-                previewTexture = &accumulationBuffer;
-            else if (textureToPreview == TextureToPreview::UVLayout)
-                previewTexture = &uvLayoutMap;
-            else if (textureToPreview == TextureToPreview::FinalLightmap)
-                previewTexture = &bakedLightMap;
-            else
-                previewTexture = &bakedLightMap;
+            // 2. 使用 switch 语句来选择正确的纹理
+            RenderTexture* previewTexture = nullptr;
+            switch (textureToPreview)
+            {
+                case TextureToPreview::UVLayout:
+                    previewTexture = &uvLayoutMap;
+                    break;
+                case TextureToPreview::SurfaceMap:
+                    previewTexture = &surfaceMap;
+                    break;
+                case TextureToPreview::SurfaceMapNormal:
+                    previewTexture = &surfaceMapNormal;
+                    break;
+                case TextureToPreview::SurfaceMapAlbedo:
+                    previewTexture = &surfaceMapAlbedo;
+                    break;
+                case TextureToPreview::Accumulation:
+                    previewTexture = &accumulationBuffer;
+                    break;
+                case TextureToPreview::DenoisedLightmap:
+                    previewTexture = &denoisedLightMap;
+                    break;
+                case TextureToPreview::FinalLightmap:
+                default:
+                    previewTexture = &bakedLightMap;
+                    break;
+            }
 
             Float2 viewportSize;
             viewportSize.x = float(swapChain.Width());
@@ -2280,6 +2332,133 @@ void DXRPathTracer::BuildRTAccelerationStructure()
 
     buildAccelStructure = false;
     lastBuildAccelStructureFrame = DX12::CurrentCPUFrame;
+}
+
+void DXRPathTracer::DenoiseLightmap()
+{
+    PIXMarker marker(DX12::CmdList, "Denoise Lightmap with OIDN");
+    OutputDebugStringA("Starting lightmap denoising process...\n");
+
+    if (isBaking)
+        isBaking = false;
+    
+    // --- 步骤 1-3: 从GPU复制到回读缓冲区 (这部分不变) ---
+    ID3D12GraphicsCommandList* cmdList = DX12::CmdList;
+    bakedLightMap.MakeReadable(cmdList); 
+
+    D3D12_RESOURCE_DESC textureDesc = bakedLightMap.Resource()->GetDesc();
+    UINT64 uploadBufferSize = 0;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout;
+    DX12::Device->GetCopyableFootprints(&textureDesc, 0, 1, 0, &layout, nullptr, nullptr, &uploadBufferSize);
+    
+    ReadbackBuffer readbackBuffer;
+    readbackBuffer.Initialize(uploadBufferSize);
+    readbackBuffer.Resource->SetName(L"Lightmap Readback Buffer");
+    
+    D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
+    srcLoc.pResource = bakedLightMap.Resource();
+    srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    srcLoc.SubresourceIndex = 0;
+
+    D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
+    dstLoc.pResource = readbackBuffer.Resource;
+    dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dstLoc.PlacedFootprint = layout;
+    
+    cmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+
+    DX12::FlushGPU();
+
+    // --- 步骤 4-6: 在CPU上执行降噪 (注意这里的类型转换修复) ---
+    const uint8_t* mappedData = reinterpret_cast<const uint8_t*>(readbackBuffer.Map());
+    
+    const uint32_t width = static_cast<uint32_t>(bakedLightMap.Width());
+    const uint32_t height = static_cast<uint32_t>(bakedLightMap.Height());
+
+    std::vector<float> noisyData(width * height * 4);
+    
+    const uint32_t srcRowPitch = layout.Footprint.RowPitch;
+    const uint32_t dstRowPitch = width * 4 * sizeof(float);
+    for(uint32_t y = 0; y < height; ++y) {
+        memcpy(noisyData.data() + (y * width * 4), mappedData + (y * srcRowPitch), dstRowPitch);
+    }
+
+    readbackBuffer.Unmap();
+    
+    std::vector<float> denoisedData;
+    oidnDenoiser.Denoise(denoisedData, noisyData, width, height);
+    
+    // --- 步骤 7: 将降噪后的数据上传到新的GPU纹理中 (这是新的实现) ---
+
+    // 7a. 获取一个临时的上传缓冲区 (使用原生D3D12 API，不依赖d3dx12.h)
+    ID3D12Resource* uploadBuffer = nullptr;
+
+    // 首先，定义堆的属性。对于上传缓冲区，我们使用 D3D12_HEAP_TYPE_UPLOAD。
+    D3D12_HEAP_PROPERTIES heapProps = {};
+    heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+    heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    heapProps.CreationNodeMask = 1; // 单GPU操作
+    heapProps.VisibleNodeMask = 1;  // 单GPU操作
+
+    // 接着，定义资源的描述。这是一个缓冲区。
+    D3D12_RESOURCE_DESC resourceDesc = {};
+    resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    resourceDesc.Alignment = 0;
+    resourceDesc.Width = uploadBufferSize; // 这个尺寸我们从GetCopyableFootprints获得
+    resourceDesc.Height = 1;
+    resourceDesc.DepthOrArraySize = 1;
+    resourceDesc.MipLevels = 1;
+    resourceDesc.Format = DXGI_FORMAT_UNKNOWN; // 缓冲区的格式通常是UNKNOWN
+    resourceDesc.SampleDesc.Count = 1;
+    resourceDesc.SampleDesc.Quality = 0;
+    resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR; // 缓冲区的布局
+    resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    // 现在，使用上面定义的结构体调用核心API
+    DXCall(DX12::Device->CreateCommittedResource(
+        &heapProps,                          // 堆属性
+        D3D12_HEAP_FLAG_NONE,
+        &resourceDesc,                       // 资源描述
+        D3D12_RESOURCE_STATE_GENERIC_READ,   // 上传堆的初始状态
+        nullptr,
+        IID_PPV_ARGS(&uploadBuffer)));
+    uploadBuffer->SetName(L"Lightmap Upload Buffer");
+
+    // 7b. 将CPU数据拷贝到上传缓冲区，注意处理行间距(Row Pitch)
+    uint8_t* mappedUploadData = nullptr;
+    uploadBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mappedUploadData));
+    const uint8_t* srcData = reinterpret_cast<const uint8_t*>(denoisedData.data());
+    for (uint32_t y = 0; y < height; ++y) {
+        memcpy(mappedUploadData + y * srcRowPitch, srcData + y * dstRowPitch, dstRowPitch);
+    }
+    uploadBuffer->Unmap(0, nullptr);
+
+    // 7c. 将目标纹理的状态切换为“可复制目标”
+    denoisedLightMap.Transition(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    // 7d. 记录从上传缓冲区到最终纹理的复制命令
+    D3D12_TEXTURE_COPY_LOCATION uploadSrcLoc = {};
+    uploadSrcLoc.pResource = uploadBuffer;
+    uploadSrcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    uploadSrcLoc.PlacedFootprint = layout;
+
+    D3D12_TEXTURE_COPY_LOCATION finalDstLoc = {};
+    finalDstLoc.pResource = denoisedLightMap.Resource();
+    finalDstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    finalDstLoc.SubresourceIndex = 0;
+    
+    cmdList->CopyTextureRegion(&finalDstLoc, 0, 0, 0, &uploadSrcLoc, nullptr);
+
+    // 7e. 将目标纹理的状态切换回“像素着色器资源”，以便后续使用
+    denoisedLightMap.Transition(cmdList, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    // 7f. 延迟释放临时的上传缓冲区，确保GPU用完它之后再释放
+    DX12::DeferredRelease(uploadBuffer);
+
+    // --- 步骤 8 (不变) ---
+    textureToPreview = TextureToPreview::DenoisedLightmap;
+    OutputDebugStringA("Denoising complete and uploaded to GPU.\n");
 }
 
 void EnableDebugLayerAndGBV()

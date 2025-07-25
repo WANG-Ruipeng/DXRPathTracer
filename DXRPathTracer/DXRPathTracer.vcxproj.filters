@@ -129,6 +129,7 @@
       <Filter>SampleFramework12\Graphics</Filter>
     </ClCompile>
     <ClCompile Include="..\Externals\xatlas\xatlas.cpp" />
+    <ClCompile Include="OidnDenoiser.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="AppSettings.h" />
@@ -289,6 +290,7 @@
     </ClInclude>
     <ClInclude Include="..\Externals\xatlas\xatlas.h" />
     <ClInclude Include="..\Externals\xatlas\xatlas_c.h" />
+    <ClInclude Include="OidnDenoiser.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="SampleFramework12">

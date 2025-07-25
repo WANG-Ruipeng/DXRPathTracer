@@ -60,13 +60,13 @@
       <TreatWarningAsError>true</TreatWarningAsError>
       <MultiProcessorCompilation>false</MultiProcessorCompilation>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)..\Externals\xatlas;$(ProjectDir)..\Externals\Aftermath\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\Externals\xatlas;$(ProjectDir)..\Externals\Aftermath\include;$(ProjectDir)..\Externals\oidn\include\OpenImageDenoise;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(ProjectDir)..\Externals\Aftermath\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>GFSDK_Aftermath_Lib.x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\Externals\Aftermath\lib\x64;$(ProjectDir)..\Externals\oidn\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>GFSDK_Aftermath_Lib.x64.lib;OpenImageDenoise.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -81,15 +81,15 @@
       <TreatWarningAsError>true</TreatWarningAsError>
       <MultiProcessorCompilation>false</MultiProcessorCompilation>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)..\Externals\xatlas;$(ProjectDir)..\Externals\Aftermath\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\Externals\xatlas;$(ProjectDir)..\Externals\Aftermath\include;$(ProjectDir)..\Externals\oidn\include\OpenImageDenoise;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <AdditionalLibraryDirectories>$(ProjectDir)..\Externals\Aftermath\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>GFSDK_Aftermath_Lib.x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\Externals\Aftermath\lib\x64;$(ProjectDir)..\Externals\oidn\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>GFSDK_Aftermath_Lib.x64.lib;OpenImageDenoise.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -145,6 +145,7 @@
     <ClCompile Include="..\SampleFramework12\v1.02\ImGui\imgui_widgets.cpp" />
     <ClCompile Include="AppSettings.cpp" />
     <ClCompile Include="MeshRenderer.cpp" />
+    <ClCompile Include="OidnDenoiser.cpp" />
     <ClCompile Include="PostProcessor.cpp" />
     <ClCompile Include="DXRPathTracer.cpp" />
   </ItemGroup>
@@ -204,6 +205,7 @@
     <ClInclude Include="AppConfig.h" />
     <ClInclude Include="AppSettings.h" />
     <ClInclude Include="MeshRenderer.h" />
+    <ClInclude Include="OidnDenoiser.h" />
     <ClInclude Include="PostProcessor.h" />
     <ClInclude Include="DXRPathTracer.h" />
     <ClInclude Include="SharedTypes.h" />
