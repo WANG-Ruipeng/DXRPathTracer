@@ -162,9 +162,6 @@ float4 PSForward(in PSInput input) : SV_Target0
     }
     else
     {
-        // === 原始的动态光照路径 (您的旧代码) ===
-        // 如果开关为 false，我们就执行原来的、复杂的动态光照计算。
-
         float3 vtxNormalWS = normalize(input.NormalWS);
         float3 positionWS = input.PositionWS;
 

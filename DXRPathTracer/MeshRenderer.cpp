@@ -434,7 +434,7 @@ void MeshRenderer::RenderMainPass(ID3D12GraphicsCommandList* cmdList, const Came
     D3D12_INDEX_BUFFER_VIEW ibView;
 
     // 检查是否存在由 xatlas 生成的光照贴图专用几何体
-    if (model->GetLightmappedVertexCount() > 0)
+    if (AppSettings::EnableLightMapRender.Value() && model->GetLightmappedVertexCount() > 0)
     {
         // 如果存在，就使用这些包含正确 LightmapUV 的新缓冲区
         vbView = model->GetLightmappedVertexBuffer().VBView();
@@ -446,6 +446,7 @@ void MeshRenderer::RenderMainPass(ID3D12GraphicsCommandList* cmdList, const Came
         vbView = model->VertexBuffer().VBView();
         ibView = model->IndexBuffer().IBView();
     }
+
 
     cmdList->IASetVertexBuffers(0, 1, &vbView);
     cmdList->IASetIndexBuffer(&ibView);

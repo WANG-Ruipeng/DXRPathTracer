@@ -372,7 +372,6 @@ void BakeRayGen()
     // 初始化随机数种子
     uint sampleSetIdx = 0;
     
-    // --- 修改开始 ---
     // 1. 根据世界法线构建一个TBN变换矩阵 (Tangent-to-World)
     float3 up = abs(worldNormal.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
     float3 tangent = normalize(cross(up, worldNormal));
@@ -385,7 +384,6 @@ void BakeRayGen()
 
     // 3. 将方向变换到世界空间
     float3 rayDir = mul(rayDirTS, tangentToWorld);
-    // --- 修改结束 ---
 
     // 准备光线和Payload
     RayDesc ray;
@@ -424,14 +422,35 @@ void BakeRayGen()
 
     float3 newSampleColor = payload.Radiance;
     const float minLuminance = 0.0001f;
+
+    float4 previousAccumulation = g_AccumulationBuffer[pixelCoord];
+    float3 colorSum = previousAccumulation.xyz;
+    float validSampleCount = previousAccumulation.w;
+
+    // 仅在已有有效采样时才进行动态钳制
+    if (validSampleCount >= 1.0f)
+    {
+        float3 averageColor = colorSum / validSampleCount;
+        
+        // 定义一个乘数因子，表示新样本亮度可以是平均亮度的多少倍
+        // 这个值也可以放在 AppSettings.hlsl 中，通常设为 5.0 ~ 15.0
+        const float fireflyMultiplier = 10.0f;
+
+        float averageLuminance = dot(averageColor, float3(0.299, 0.587, 0.114)) + 0.001f; // 加个小数避免除零
+        float sampleLuminance = dot(newSampleColor, float3(0.299, 0.587, 0.114));
+
+        if (sampleLuminance > averageLuminance * fireflyMultiplier)
+        {
+            // 如果新样本太亮，就把它拉回至平均亮度的 fireflyMultiplier 倍
+            newSampleColor *= (averageLuminance * fireflyMultiplier / sampleLuminance);
+        }
+    }
+
     bool isNan = any(isnan(newSampleColor));
     float luminance = dot(newSampleColor, float3(0.299, 0.587, 0.114));
     bool isTooDark = luminance < minLuminance;
     bool isValidSample = !isNan && !isTooDark;
     
-    float4 previousAccumulation = g_AccumulationBuffer[pixelCoord];
-    float3 colorSum = previousAccumulation.xyz;
-    float validSampleCount = previousAccumulation.w;
     if (isValidSample)
     {
         colorSum += newSampleColor;
