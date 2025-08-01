@@ -27,6 +27,7 @@
 #include "OidnDenoiser.h"
 
 using namespace SampleFramework12;
+using Microsoft::WRL::ComPtr;
 
 class DXRPathTracer : public App
 {
@@ -146,6 +147,12 @@ protected:
     OidnDenoiser oidnDenoiser;
     RenderTexture denoisedLightMap;
     bool denoisingRequested = false;
+    ComPtr<ID3D12Resource> m_lightmapUploadBuffer;
+    ReadbackBuffer m_lightmapReadbackBuffer;
+    bool m_uploadDenoisedDataRequested = false;
+    bool useDenoisedLightmap = false;
+    std::vector<float> m_denoisedCpuData;
+    void UploadDenoisedData();
 
     virtual void Initialize() override;
     virtual void Shutdown() override;
@@ -182,6 +189,13 @@ protected:
     void DenoiseLightmap();
 
     D3D12_CPU_DESCRIPTOR_HANDLE g_NullUAV;
+
+    CompiledShaderPtr medianDenoiseCS;
+    ID3D12RootSignature* medianDenoiseRS = nullptr;
+    ID3D12PipelineState* medianDenoisePSO = nullptr;
+    bool medianDenoiseRequested = false;
+
+    void RenderLightmapMedianPass();
 
 public:
     DXRPathTracer(const wchar* cmdLine);
