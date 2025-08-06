@@ -40,8 +40,7 @@ void Sort9(inout float3 values[9])
 
 cbuffer DenoiseConstants : register(b0)
 {
-    int FilterRadius; // 对于3x3窗口，半径为1
-    uint2 Padding;
+    int FilterRadius; // 对于一个 3x3 窗口，半径是 1
 };
 
 // 输入：原始的、有噪声的纹理
